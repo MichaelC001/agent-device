@@ -3,9 +3,9 @@
 ## Status
 
 Accepted (2026-07-10). Implemented on `main`, including the amendments folded into the decisions
-below (#1264, #1269, #1271 stage 2, #1280, #1349); only decision 5's replay benchmark extension
-remains deferred. The per-step landing record (PRs #1193-#1349) and the pre-acceptance migration
-plan live in this file's git history.
+below (#1264, #1269, #1271 stage 2, #1280, #1349, #1385); only decision 5's replay benchmark
+extension remains deferred. The per-step landing record (PRs #1193-#1349) and the pre-acceptance
+migration plan live in this file's git history.
 
 ## Rules at a glance
 
@@ -29,7 +29,9 @@ Normative summary, one entry per decision. The binding contracts, amendments, an
    `identity-unverifiable` divergence, never a silent pick. Amendments: non-unique ids demote to
    role+label (#1269); an identity-empty pressed container records its first labeled descendant,
    double-guarded fail-closed (#1280); `wait` landmark identity and `is` coverage dispatch on the
-   `targetIdentityVerification` descriptor trait (#1349).
+   `targetIdentityVerification` descriptor trait (#1349); the pre-dispatch verification capture
+   bounds-retries a content-quality `capture-failed`/`sparse-snapshot` verdict on an app-launch race,
+   opt-in per call site (#1385).
 4. **Divergence is a structured error, resumable by plan ordinal.** `ok:false` with code
    `REPLAY_DIVERGENCE` and `details.divergence` v1: `kind` (`action-failure` | `selector-miss` |
    `identity-mismatch` | `identity-unverifiable`), a bounded `screen` (same capture scope as plain
@@ -368,6 +370,41 @@ A field present in the recording but absent on the compared node is a mismatch; 
 An old unannotated action remains executable without this check. All three divergence classes are
 target-binding divergences reported before the device action. This is not general outcome verification:
 `--verify` remains post-action change evidence with a different contract.
+
+> **Amendment (#1385).** The capture this verification runs against (`captureDivergenceObservation`) is
+> itself the pre-dispatch gate a step right after `open --relaunch` races: the app can still be
+> launching/mounting when it lands, producing a transient content-quality verdict — `capture-failed`
+> (Android's snapshot helper returns "insufficient foreground app content" while the app is mounting, and
+> the capture path throws) or `sparse-snapshot` (iOS's private-AX fallback under load) — that is not a
+> real divergence, only an unlucky capture. This capture now retries with a bounded backoff (fixed
+> 7-entry delay list, 12s DELAY-ONLY budget — see below) before falling through to `identity-unverifiable`,
+> mirroring the keep-polling semantics `wait`'s recorded-landmark identity verification (#1349) already
+> applies on its own (post-resolution) path. The retry is opt-in per call site (`retryLaunchRace`), not a
+> change to every `captureDivergenceObservation` caller: only the pre-dispatch verification gate in
+> `verifyReplayActionTarget` races a launch this way — the post-failure diagnostic capture
+> (`buildReplayFailureDivergence`) and the post-resolution guard-mismatch capture both follow an
+> already-real failure, where retrying would only delay an already-decided divergence.
+>
+> The retry loop is further gated on the SAME content-quality-vs-mechanism-failure taxonomy #1381 draws
+> for the wait keep-poll loop (`isUnreadableCaptureContentError`): the non-throwing `sparse-snapshot`
+> verdict always retries (it is already a content-quality signal), but a thrown `capture-failed` only
+> retries when the underlying error's `androidSnapshotHelperFailureReason` is one of the three literal
+> codes `rejectAndroidHelperContentUnavailable` (`platforms/android/snapshot.ts`) attaches to a
+> content-poor/system-window-only rejection — `empty-helper-output`, `system-window-only`,
+> `content-poor-app-window` (mirroring `AndroidHelperContentRecoveryDecision['reason']`,
+> `platforms/android/snapshot-content-recovery.ts`). This is deliberately narrower than the error's own
+> generic `retriable` flag: Android's adb layer separately marks true mechanism failures retriable too
+> (`connection_dropped`, `device_offline`, `server_version_mismatch` — an unchanged retry of the SAME adb
+> command can succeed there), and a helper artifact permanently missing
+> (`androidSnapshotHelperUnavailableError`) carries neither signal. A mechanism failure therefore still
+> fails on the first attempt rather than spending the retry budget on a foregone conclusion, regardless of
+> what its own `retriable` flag says.
+>
+> The 12s budget is a DELAY-ONLY bound, anchored at the first capture attempt: it caps how long this loop
+> sleeps between retries, not how long any individual capture attempt itself may run (a capture already
+> carries its own platform-level timeouts this loop does not shorten or re-implement). The fixed-length
+> delay array is a separate, independent bound on attempt COUNT, so a mocked-instant `sleep` in unit tests
+> cannot turn this into a real-time busy-loop.
 
 ### 4. Divergence wire contract and replay-only resume
 
