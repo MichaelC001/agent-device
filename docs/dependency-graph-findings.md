@@ -1,19 +1,54 @@
 # Dependency graph findings
 
-Snapshot analysis of the production import graph — 894 files, 4619 edges, 25 zones — taken while
-doing the boundary work in this branch. It is a dated observation, not a normative document; when
-it disagrees with `scripts/layering/`, the gate wins.
+Snapshot analysis of the production import graph — 918 files, 25 zones — taken while doing the
+boundary work across #1405 and its follow-ups. It is a dated observation, not a normative
+document; when it disagrees with `scripts/layering/`, the gate wins.
 
-The graph tool that produced it lives on the `claude/depgraph-viewer` branch (`pnpm depgraph`),
-deliberately kept out of this change so the refactor stands on its own.
+Two ways to reproduce any number below. `pnpm depgraph` (#1410) emits the whole graph as JSON plus a
+summary, and is the tool to reach for when you want the reachability or cycle analysis it computes. A
+*rendered* viewer was also built and dropped — ~2200 lines and a Fallow exemption for a picture
+neither a human nor an agent drew a conclusion from; the analysis survived, the rendering did not.
+
+For a one-off question, a throwaway probe against the gate's own model is faster and leaves nothing
+to clean up:
+
+```ts
+// scripts/layering/.probe.ts (throwaway; the gate's model is the only dependency)
+import fs from 'node:fs';
+import { listSourceFiles } from './check.ts';
+import { resolveImportEdges, typeInversionPair, backEdgePair } from './model.ts';
+
+const files = listSourceFiles();
+const sources = new Map(files.map((f) => [f, fs.readFileSync(f, 'utf8')]));
+const edges = resolveImportEdges(sources);
+
+// e.g. R6 inversions per zone pair, deduplicated by file pair — reproduces
+// TYPE_INVERSION_BASELINE, so a mismatch means one of the two is stale.
+const seen = new Set<string>();
+const byPair = new Map<string, number>();
+for (const edge of edges) {
+  const pair = typeInversionPair(edge);
+  if (!pair) continue;
+  const id = `${edge.file} -> ${edge.target}`;
+  if (seen.has(id)) continue;
+  seen.add(id);
+  byPair.set(pair, (byPair.get(pair) ?? 0) + 1);
+}
+console.log([...byPair].sort((a, b) => b[1] - a[1]));
+```
+
+Run with `node --experimental-strip-types scripts/layering/.probe.ts` and delete it after. Swap
+`typeInversionPair` for `backEdgePair` for R5, or group `edges` by `fromZone`/`toZone` for
+zone-level traffic. Deduplicating by file pair matters: the gate counts each file pair once, so a
+raw edge count reads higher.
 
 ## Where this round landed
 
 |                                                          | before                 | after                                           |
 | -------------------------------------------------------- | ---------------------- | ----------------------------------------------- |
-| type-only spine inversions (R6)                          | 61 across 6 zone pairs | **35 across 4**, ratcheted                      |
+| type-only spine inversions (R6)                          | 61 across 6 zone pairs | **7 across 4**, ratcheted                       |
 | files in the unranked `(root)` zone                      | 29                     | **13** — entrypoints and composition roots only |
-| files covered by the ranked spine                        | 651 of 892             | **729 of 894**                                  |
+| files covered by the ranked spine                        | 713 of 898             | **888 of 901**                                  |
 | type imports pointing at a re-export hub in another zone | 89                     | **0**                                           |
 | selector-command rules stated in both zones              | 10 messages, 3 drifts  | **0** — shared in `selectors/`                  |
 | modules writing ADR 0014's four ref-frame fields         | 2                      | **1**, enforced by R7                           |
@@ -41,19 +76,157 @@ type-only inversions, R7 pins SessionState field ownership, and the shared selec
 - Still outside every rule: **dynamic** import direction (0 inversions today, nothing watching),
   and anything inside a zone.
 
+## 0. Where the inversions ended up (and why 7 is the floor for now)
+
+61 → 7. The last pass moved four keystones, each of which was pinning a much larger set:
+
+| Keystone moved to `contracts/` | Unblocked |
+|---|---|
+| `DaemonBatchStep` (was `core/batch.ts`, typed via `DaemonRequest['runtime']`) | `CommandFlags` |
+| `CommandFlags` (was `core/dispatch-context.ts`) | `SessionAction`, `DispatchedCommand` |
+| `TargetAnnotationV1` shape (was `replay/target-identity.ts`) | `SessionAction` |
+| `ScrollInputDirection`, Metro result payloads | `ScrollOptions`, `MetroPrepareResult`/`MetroReloadResult` |
+
+Two of those deserve their own note, because the pattern repeats: `DaemonBatchStep`'s `runtime` field
+was written `DaemonRequest['runtime']`, pulling the whole daemon request type in to say
+`SessionRuntimeHints` — the same type three zones lower. And `CommandFlags` was a single rank-2
+declaration pinning ~80 public API shapes above it. Neither looked like a keystone from the graph;
+both were found by asking "what does the target itself import, and what rank is that?"
+
+`DaemonRequest` had been conflating a request with the command that request dispatches. There are
+still only two request shapes — and that is the point, because a third would be a third name for the
+same thing:
+
+- `kernel/contracts.ts` `DaemonRequest` — the **wire** shape, `flags?: Record<string, unknown>`,
+  because a process boundary cannot enforce a flag vocabulary;
+- `daemon/types.ts` `DaemonRequest` — the wire shape with `token`/`session` required, `flags`
+  narrowed to `CommandFlags`, and `internal?: DaemonRequestInternal` carrying `SessionState`
+  callbacks and the admitted lease. Server-private, and why it cannot move down.
+
+`core/command-descriptor/` had been importing the second to read `command`, `positionals` and
+`flags` — reaching up two ranks for three fields. It now takes
+`contracts/dispatched-command.ts` `DispatchedCommand`, which is those three fields and nothing else,
+with `command`/`positionals` `Pick`ed from the wire so they cannot drift from it. Every descriptor
+resolver already read only those three, in two spellings (the full type and a `Pick` of it); one
+narrow name replaced both.
+
+**The remaining 7 are positions, not debt** — each for a mechanical reason, not an appeal to an ADR:
+
+- **4 × `AgentDeviceClient`** (`commands/command-contract.ts`, `commands/command-surface.ts`,
+  `commands/family/types.ts`, `mcp/command-tools.ts`). The facade cannot move below `commands/`
+  because it is *built from* the command surface: `client/client-types.ts` imports
+  `ProjectedNavigationCommandClient` from `commands/system/navigation-projection.ts`. That is a real
+  zone-level type cycle, and breaking it means deciding where the projection registry belongs — a
+  design call, not a file move. A narrower port does not exist either: 4 files *name* the facade,
+  but 26 call sites use methods across 13 of its namespaces, so any port would re-declare it.
+- **2 × `DaemonCommandDescriptor`** (`core/command-descriptor/derive.ts`, `.../types.ts`). It is
+  *stated in terms of* the server-private `daemon/types.ts` `DaemonRequest` —
+  `refFrameEffect?: (req: DaemonRequest) => RefFrameEffect`,
+  `allowSessionlessDefaultDevice?: (req: DaemonRequest) => boolean` — so it cannot be declared below
+  the daemon. Having `core/` re-declare a parallel 13-field shape instead would trade one erased
+  edge for a second source of truth.
+- **1 × `DaemonCommandRoute`** (`commands/command-explain.ts`). It is
+  `keyof typeof DAEMON_ROUTE_HANDLERS` — *computed from* the daemon's handler table, so it cannot
+  exist below that table. `command-explain.ts` uses it to key an exhaustive
+  `Record<DaemonCommandRoute, string>` of owner files; a hand-written union in `contracts/` would
+  drop exactly that exhaustiveness.
+
+All three are argued at `TYPE_INVERSION_BASELINE` in `scripts/layering/check.ts`, next to the
+numbers they explain.
+
+## 0b. The biggest structural finding is not an inversion
+
+Cycle size by edge kind, measured over the whole production graph:
+
+| edges considered | largest strongly-connected component |
+|---|---|
+| value only | **1** — no cycles, which is what R4 enforces |
+| value + type-only | **102 files** |
+| value + dynamic | **1** |
+| all kinds | 213 files |
+
+At runtime the module graph is a clean DAG. The 102-file cluster is purely type-level: you cannot
+read the types of any one of those files without transitively reaching all 102. (`main` carries 107;
+the boundary moves in this branch bring it to 102.) That is not a correctness
+problem — types are erased — but it is a comprehension one, and it is the single largest obstacle to
+reading a subsystem in isolation. It spans `commands` (33), `daemon` (21), `platforms` (13), `core`
+(12), hubs at `runtime-contract.ts` (25 in-cluster dependents), `commands/runtime-types.ts` (21),
+`backend.ts` (15), `commands/runtime-common.ts` (12).
+
+Now ratcheted for growth by **R9** (`TYPE_CYCLE_BASELINE` in `check.ts`), so it cannot get worse
+while nobody is looking — a type-only import that closes a new loop fails the gate, verified by
+adding one type-only import that closes a loop and watching the gate reject it. Growth-only on
+purpose: reducing it is a real refactor, so a
+hard equality would turn every unrelated improvement into a baseline edit. The refactor itself is
+still deliberately not attempted; it starts at those four hubs.
+
+### The facade cycle: investigated, no narrower port exists
+
+The 4 remaining `-> client` inversions are `AgentDeviceClient` used as an opaque handle. The obvious
+fix is a narrower port in `contracts/` describing only what `commands/` needs, with `client/`
+satisfying it. Measured before attempting it:
+
+| | count |
+|---|---|
+| Files *naming* `AgentDeviceClient` (i.e. the inversions) | 4 |
+| Files *calling* client methods | 26 |
+| Distinct facade namespaces reached | 13 |
+
+The narrowness is an artifact of where the type is *named*, not of what is *used*. Making the four
+generic over the client type pushes the concrete type down into the 26 implementations, turning 4
+inversions into up to 26. A port covering 13 namespaces is the whole facade, so it would either
+duplicate the public API shape — a second source of truth for it — or derive from the facade and
+carry the same dependency.
+
+Those four files are therefore the minimum number of naming sites, not an accident: they are the
+choke point. Accepted as a position, argued at `TYPE_INVERSION_BASELINE`. The remaining option is
+the one that was always the real question — whether `NAVIGATION_COMMAND_PROJECTIONS` belongs in
+`commands/` — and that is a design decision about the command surface, not a dependency cleanup.
+
 ## 1. The two remaining type-inversion clusters
 
 `TYPE_INVERSION_BASELINE` in `scripts/layering/check.ts` holds both, with the reasoning inline.
 
-**28 + 1 edges → `client/client-types.ts`** (1236 lines). The file does three jobs: the public
-Node-client facade (`AgentDeviceClient`, config, transport), the per-command `*Options`/`*Result`
-vocabulary that `commands/`, `contracts/` and `mcp/` all need, and a re-export hub for 24
-`contracts/` types. Only the first is client-owned. The fix is the pattern the file already uses
-for those 24 re-exports: declare the command I/O vocabulary in `contracts/` and re-export it here,
-so the public surface stays byte-identical. Note the coupling is mutual — client-types imports
-`commands/interaction/runtime/gestures.ts` and `commands/system/navigation-projection.ts` — which
-is what closes the 5-node type cycle in §4. This is also the deferred "Node client result types"
-work `CONTEXT.md` already tracks.
+**28 + 1 edges → `client/client-types.ts`** — *done, mostly.* Now 5 edges. The vocabulary moved into
+the `contracts/client-*.ts` family files — one file per command/domain family, largest 137 LOC —
+with `client/client-types.ts` keeping the `AgentDeviceClient` facade and re-exporting the rest
+through one wildcard per family. The published surface is unchanged, verified two ways against
+`main`: the exported-name set of all 11 published entrypoints is identical (70 names), and every
+declaration in the built `index.d.ts` is byte-identical after normalization (0 names added, 0 shapes
+changed). `index.d.ts` in fact got *smaller* — 1,726 → 1,682 lines — because 10 declarations that
+`main` duplicated into it (the Metro option/result shapes, `ScrollInputDirection`) now resolve
+through a shared chunk once the vocabulary sits below both its consumers.
+
+The mutual coupling this section already warned about is what set the floor. Eight shapes could NOT
+move down, because each is stated in terms of a HIGHER-ranked zone:
+
+| Shape(s) | Blocked by |
+|---|---|
+| `ScrollOptions` | `ScrollInputDirection` (`commands/interaction/runtime/gestures.ts`) |
+| `BackCommandOptions`, `OrientationCommandOptions`, `AppSwitcherCommandOptions`, `TvRemoteCommandOptions`, `AgentDeviceCommandClient` | `NavigationCommandOptions` / `ProjectedNavigationCommandClient` (`commands/system/navigation-projection.ts`) |
+| `MetroPrepareResult`, `MetroReloadResult` | `PrepareMetroRuntimeResult` / `ReloadMetroResult` (`metro/client-metro.ts`) |
+
+Declaring those in `contracts/` would have traded 28 `commands -> client` inversions for
+`contracts -> commands` and `contracts -> metro` ones — the foundation depending on the layers above
+it, which is worse in kind even though it is fewer edges. Measured, not assumed: the first attempt
+put the whole file in `contracts/` and the gate went from 42 to **48**.
+
+Two keystone moves made the other 84 shapes movable, and both are worth noting as a pattern:
+
+- `RemoteConnectionProfileFields` joined its sibling `CloudProviderProfileFields` in
+  `contracts/remote-config-fields.ts`. It was the root of the base chain
+  (`AgentDeviceClientConfig` → `AgentDeviceRequestOverrides` → `DeviceCommandBaseOptions` → every
+  per-command `*Options`), so one rank-4 declaration was pinning ~80 shapes up with it.
+- `DaemonBatchStep` moved to `contracts/batch-step.ts`. Its `runtime` field was written as
+  `DaemonRequest['runtime']`, which dragged the whole daemon request type in to say
+  `SessionRuntimeHints` — the same type, three zones lower.
+
+**Remaining `commands -> client` (5) needs the upstream declarations to come down first**: move
+`ScrollInputDirection` and the navigation-projection types out of `commands/`, and the Metro
+prepare/reload result payloads out of `metro/`. Each is small; the sequencing is the point. The
+`mcp -> client` edge is different in kind — it is the `AgentDeviceClient` facade itself, i.e. the
+question of whether a command surface should know the client type. That is a design decision, not a
+misplaced declaration.
 
 **5 + 1 edges → `daemon/daemon-command-registry.ts` and `daemon/types.ts`.** `core`'s descriptor
 registry composes the ADR 0003 daemon facet, whose shape the daemon declares. ADR 0003's
@@ -218,8 +391,9 @@ Still duplicated across zones, each needing the same treatment: `fill requires t
 
 1. **Move the 10 outward-facing `daemon/types.ts` types into `contracts/`** (§2). Mechanical, and
    it clears most of §1's second cluster.
-2. **Split `client/client-types.ts`** (§1). Largest remaining inversion cluster, closes the 5-node
-   type cycle, and it is already-tracked deferred work.
+2. ~~**Split `client/client-types.ts`** (§1).~~ Done — 42 → 18 total inversions. The follow-up is
+   the upstream moves that unblock the last 5 (§1): `ScrollInputDirection` and the
+   navigation-projection types out of `commands/`, Metro result payloads out of `metro/`.
 3. **Retire platform branches into plugin facets** (§5b), highest-count files first.
 4. **Share the remaining duplicated validators** (§6), following the `checkIsArgs` shape.
 5. Optional: give `daemon/handlers/` the directory structure its filenames already imply (§5).
