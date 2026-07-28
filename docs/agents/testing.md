@@ -179,6 +179,48 @@ pnpm mutation:baseline                  # full sweep, then record it (reviewed c
   written on every exit path, including a crash before any mutant runs: an absent envelope would be
   indistinguishable from a lane that never ran.
 
+## Parser fuzz lane
+
+`pnpm fuzz:parsers` feeds generated hostile input to `parseArgs`, selector parsing,
+`parseReplayScriptDetailed`, `batch --steps` JSON, and the Maestro compat parser, and enforces one
+invariant: every rejection is a typed `AppError` whose normalized `hint` is non-empty, and no case
+hangs (a worker-thread watchdog attributes a stall to the exact input).
+
+```sh
+pnpm fuzz:parsers                                  # all targets, 2,000 cases each, seed 1
+pnpm fuzz:parsers --target selector --iterations 50000 --seed 7
+pnpm fuzz:parsers --input-file .tmp/fuzz/<case>.json                  # repro a saved case
+pnpm fuzz:parsers --input-file .tmp/fuzz/<case>.json --append-corpus  # …and pin it
+pnpm fuzz:parsers --self-check                     # require the harness to still fail
+```
+
+The generating run is nightly (`Parser Fuzz Lane` in `.github/workflows/replays-nightly.yml`, seeded
+by the run number). Every terminal path — pass, fail, `--self-check`, or a crash in the harness
+itself — writes `<artifact-dir>/run-envelope.json` on the shared lane contract
+(`scripts/lib/lane-envelope.ts`, #1430), with the lane's own facts under `data`: mode, per-target
+cases/failures/durations, failures, repro commands, and `stage` (`error` marks a run that could not
+complete itself, since the shared `result` is only `pass`/`fail`). `configHash` hashes the modules
+that decide a case set, so "the same seed means different inputs now" is distinguishable from "the
+parsers changed". The self-check and fuzz steps write to separate artifact subdirectories and both
+run unconditionally; the step summary prints each envelope it finds and never fails on a missing
+file.
+
+Cases come from fast-check arbitraries (`scripts/fuzz/arbitraries.ts`) built on the hazard vocabulary
+shared with `src/__tests__/test-utils/property-arbitraries.ts`, so a hazard added for the property
+suite reaches the fuzz lane too — and a counterexample is reported **shrunk**, with fast-check's seed
+and replay path printed alongside the saved artifact.
+
+A nightly discovery reaches the unit lane by promotion, not hand-editing: the printed
+`promote:` command re-runs the downloaded artifact and appends it to
+`scripts/fuzz/corpus/regressions.json`, which `scripts/fuzz/corpus-replay.test.ts` replays on every
+PR — through the same worker watchdog, so a promoted hang case fails against its per-case budget
+instead of wedging the unit job. `scripts/fuzz/harness.test.ts` covers the harness itself — an
+untyped throw, an empty hint, and a wedged worker must each be reported, startup time is never charged against the per-case budget, and
+every mode writes an envelope — using the broken-on-purpose targets in
+`scripts/fuzz/self-check-targets.ts` (also what `--self-check` runs in CI), so a regressed classifier
+or watchdog cannot pass silently. Adding a parser to the lane means adding a target to
+`scripts/fuzz/targets.ts` — nothing else.
+
 ## Live web smoke
 
 The live web platform smoke runs the public built CLI against a local fixture page through the managed web backend:
