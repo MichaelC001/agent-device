@@ -21,6 +21,7 @@ The mapping it encodes, for when you need to run a gate directly or reason about
 | SkillGym prompts/assertions | `pnpm test:skillgym:case <case-id>` (broad: `pnpm test:skillgym`, filter with `-- --tag fixture-smoke` or `-- --tag skill-guidance`) — agentic routing + local-help-consumption proof only; command-planning knowledge checks belong in the help bench |
 | `.ad` grammar (`src/replay/script.ts`, gesture arity, replay vars) | `pnpm exec vitest run --project unit-core test/replay-compat` — the frozen replay-compat corpus asserts which released script surfaces still parse; a flipped verdict is edited in `test/replay-compat/manifest.ts`, never in the script. Adding or re-pinning a corpus entry also runs `pnpm check:replay-compat`, which re-derives each entry from its release tag in git history |
 | Anything in `src/`, `test/`, `skills/` | `pnpm format` |
+| A decision kernel or its tests (`src/kernel/errors.ts`, `src/daemon/ref-frame.ts`, `src/commands/interaction/runtime/settle.ts`, `src/utils/scroll-edge-state.ts`, `src/selectors/`) | `pnpm mutation:affected --base origin/main` (minutes; GitHub runs it per PR — see the mutation ratchet section) |
 
 Two traps worth naming:
 
@@ -119,6 +120,64 @@ The plan documents the rule and changed path behind every selected check.
 
 Model and catalog live under `scripts/check-affected/`; the derivation is guarded
 by `pnpm check:affected:test` (the `Affected-check Selector` CI job).
+
+## Mutation ratchet over decision kernels
+
+Mutation score is the mechanical answer to "is this test load-bearing or decorative". A full-suite
+sweep is unaffordable, so the scope is an enumerated list of pure decision kernels — modules where a
+surviving mutant means a silently wrong agent-facing decision. The registry
+(`scripts/mutation/modules.ts`) is the single source of truth: `stryker.config.json`'s `mutate` globs
+are asserted against it, and PR-affected selection maps changed files through it. Modules that spawn
+subprocesses or wait real time stay out by construction.
+
+```sh
+pnpm mutation:test                      # ratchet self-test (fast, no Stryker)
+pnpm mutation:run --modules selectors   # one module locally (~7 min for selectors)
+pnpm mutation:check                     # ratchet an existing .tmp/mutation/mutation.json
+pnpm mutation:baseline                  # full sweep, then record it (reviewed commit)
+```
+
+- **Weekly full sweep** (`.github/workflows/mutation-weekly.yml`) runs `shardMatrix()` from the
+  registry: one job per module, except modules that declare a `shards` count and are sliced with
+  `--shard i/n` (selectors is ~1,280 mutants, well past the 30-minute budget in one job). The ratchet
+  merges the shard reports (`--report-dir`) for one verdict and requires the full set
+  (`--expect-shards`), so a dead shard fails the lane instead of scoring its module as 0. Results are
+  reported as a job summary plus an artifact. It never commits: the proposed baseline rides in the
+  artifact, and applying it is a reviewed `pnpm mutation:baseline` commit, so a score cannot lower
+  itself.
+- **PR lane** (`.github/workflows/mutation-affected.yml`) derives the affected shard matrix
+  (`--list-affected`) and merges the shards into one verdict. Before graduation the matrix is empty —
+  a report nobody acts on is not worth the runner minutes — unless the diff touches the lane's own
+  tooling, the one pre-graduation run that buys something: the gate has to be proven before it bites.
+  Lane sources own no kernel, so that exception adds `LANE_CANARY` (`kernel-errors`, the registry's
+  cheapest real sweep) to whatever the diff derives; otherwise it would select zero mutants and prove
+  nothing. `scripts/mutation/selection.test.ts` drives both halves of the rule through the real CLI
+  against a throwaway worktree commit.
+- **Ratchet**: scores may only rise. `mutation-baselines/decision-kernels.json` records the
+  high-water score per module plus the Stryker version and config content hash that produced it, so a
+  score change caused by a tool/config change is reported as provenance drift, never as a
+  test-strength regression.
+- **Graduation, not a flag day**: gating is off until two consecutive comparable weekly sweeps pass
+  (`stableRuns`/`requiredStableRuns` in the baseline); the PR job starts selecting modules — and
+  failing on them — once the committed baseline says `gating: true`. A regression or provenance drift
+  resets the counter.
+- **Test scope** is derived from Vitest's module graph (`vitest related` over the mutated files), the
+  same delegation `pnpm check:affected` uses; see `scripts/mutation/test-scope.ts` for the three
+  groups it drops and why dropping them cannot hide a surviving mutant.
+- **Test ownership is derived, never listed** (`scripts/mutation/ownership.ts`): a test owns every
+  kernel its imports reach, so `src/__tests__/daemon-error.test.ts` selects `kernel-errors` through
+  `src/daemon.ts` without naming it. A listed set of test files would silently omit exactly those
+  indirect tests and rot as tests are added — weakening one would skip the ratchet. Reaching a kernel
+  is a superset of killing its mutants, so the PR lane over-selects on purpose and shards the
+  selected modules; a false positive costs runner minutes, a false negative costs the gate. Non-kernel
+  *sources* are not owned: they can only move a score through those tests, and the weekly sweep
+  re-measures the whole surface.
+- **Lane envelope** (`scripts/lib/lane-envelope.ts`, issue #1430): every run writes
+  `.tmp/mutation/lane-envelope.json` — schema version, commit, Stryker version, config hash, seed
+  (`null`; the input is enumerated, not randomized), duration, result, stage, per-module scores — and
+  both workflows upload it, so lane freshness and tool drift are readable without parsing logs. It is
+  written on every exit path, including a crash before any mutant runs: an absent envelope would be
+  indistinguishable from a lane that never ran.
 
 ## Live web smoke
 
