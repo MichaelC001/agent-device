@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (implemented through Layer 3, 2026-07-04: #1080, #1082–#1086, #1091, #1092)
+Accepted (implemented through Layer 3, 2026-07-04: #1080, #1082–#1086, #1091, #1092; ambiguity contract amended 2026-08-07)
 
 ## Context
 
@@ -64,7 +64,7 @@ every cell to be classified:
 
 ```ts
 export const INTERACTION_GUARANTEES = [
-  'disambiguation',        // visible > deepest > smallest; ties fail
+  'disambiguation',        // collapse one equivalent wrapper chain; distinct subtrees fail with candidates
   'occlusion',             // covered targets are refused
   'offscreen',             // tap point (rect center) must lie in the root viewport
   'nonHittable',           // promotion + targetHittable/hint annotation
@@ -238,6 +238,27 @@ the daemon there destroyed every healthy app session the daemon owned.
 - The registry doubles as documentation input for help/skill output ("what
   press guarantees"), which matters for small-model agents that only read the
   contract, never the code.
+
+### 2026-08-07 amendment: mutating ambiguity fails fast
+
+Element-14 realized the matrix's previously owned success-path gap: four exact
+`Team Standup` matches in distinct accessibility subtrees reached ordinary
+runtime selector resolution, whose visible/depth/area ranking silently chose a
+different semantic target. Mutating selectors no longer use geometry to choose
+among distinct subtrees.
+
+The replacement contract is structural. Multiple matches collapse only when
+all matches form one ancestor–descendant chain and every member resolves to the
+same actionable node. Otherwise the mutation fails with `AMBIGUOUS_MATCH`, a
+bounded list of snapshot candidate lines, and a partial ref frame generation so
+the caller can retry one listed candidate immediately. On the direct XCTest path
+this applies to mutating dispatches only: they count all raw exact matches before
+hittability can select a winner and delegate multiple matches to the runtime
+classifier. Reads (`querySelector`, and so `get`/`is`/`wait`) keep the prior rule
+— prefer the single hittable match, ambiguous only when hittable matches compete
+— because a read has no side effect to guard and failing it closed would turn a
+decorative duplicate into an error. Maestro's explicit expected-point /
+non-hittable compatibility path remains intentionally separate.
 
 ### Synthesized iOS gesture policy
 
