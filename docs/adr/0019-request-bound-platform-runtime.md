@@ -632,6 +632,10 @@ removed against package bytes added; net growth is exceptional and each contribu
 named and justified individually. Contract modules stay vocabulary-thin under the existing
 capture-kit rule; per-unit type inflation is size growth and is reviewed as such.
 
+Raw per-unit parity, planted-red, and size evidence belongs in #1739 and its PRs; this ADR retains
+the decision, the evidence tiers, and the rule that each unit must justify exceptional growth
+without treating checkpoint budget as an allowance.
+
 A command surface that is deprecated and scheduled for removal at the next major is never
 migrated. It stays on its legacy execution shape until the major deletes it, and the deletion — not
 a migration — retires its platform coupling. Where a command's public surface is being narrowed,
