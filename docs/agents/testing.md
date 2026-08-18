@@ -555,6 +555,17 @@ Measured on the full unit suite (340 files, 3,210 tests, 48s wall at ~7x paralle
   2.5s, integration 15s, failure at 2x budget (the band between reports without failing — host
   load legitimately stretches borderline tests, and a flaky gate trains people to ignore it).
   The pin list only shrinks, or grows in the same PR with a justification.
+- **The test-file size ratchet** (`src/__tests__/test-file-size-ratchet.test.ts`) is the same
+  shape for the other resource a giant test file consumes — a reader's context. Every test file
+  over the 1,000-line tripwire is pinned at its exact length, R9-style: growth fails ("split it
+  along the source module it mirrors"), shrinking fails until the pin is lowered in the same PR,
+  a file that drops under the line leaves the list, and a new file may not cross it. The map is
+  not the authority — git is: every file over the line is also held to its length at the
+  merge-base with `origin/main` (renames followed), and no pin may exceed its file's base length,
+  so growing a file and raising its pin, or adding a giant file with a pin, are red against
+  history; a pin on a file at or under the line is red on its own, so the map cannot grow by
+  pinning small files at their own length. Adding a test to a pinned file means moving that family out first — the failure names
+  the file and the fix; never raise a pin. Needs `origin/main` fetched (CI's Coverage job does).
 - **Isolation stays ON; pool stays forks — both measured.** `--no-isolate`: 205s wall vs 48s
   (module state — timers, memos, singletons — thrashes across files sharing a worker).
   `--pool=threads`: no change (50.4s). The ~100s aggregate import overhead is the price of
