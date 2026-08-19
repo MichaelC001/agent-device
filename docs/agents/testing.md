@@ -153,6 +153,12 @@ the generator, where every property inherits it — not in a new hand-pinned cas
 
 ## Affected-check selector (`pnpm check:affected`)
 
+Fast local feedback is a project value: the default developer loop should run the smallest relevant
+gate set and return as quickly as correctness allows. Expensive informational measurements belong in
+CI unless they are needed to diagnose a reported result. In particular, do not build a base checkout
+or run package-size comparisons locally by default; use the authoritative Size workflow report during
+review.
+
 `pnpm check:affected --base <ref>` derives which local checks a diff needs, so
 agents stop interpreting the testing matrix by hand. It is a **fail-open
 advisory**: existing GitHub CI stays authoritative and required, and this only
