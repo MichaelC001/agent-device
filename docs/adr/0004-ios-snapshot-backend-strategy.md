@@ -78,10 +78,61 @@ capture-plan tier before the process boundary. The contract fixture under
 `contracts/fixtures/snapshot-presentation-conformance.json` is the shared proof between those
 runtimes; it does not imply that Swift and TypeScript share an implementation.
 
-This is the first ownership slice of the Wave 4 debt tracked by #1983. Freshness recovery,
-timeout evidence, and screenshot-overlay policy retain their existing daemon adapters until their
-neutral host seams are extracted; new consumers must use the facet rather than add another daemon
-presentation path.
+The same split now holds for the three remaining Wave 4 policies tracked by #1983, so
+`src/snapshot/` is the host-side owner of snapshot policy generally rather than of presentation
+alone:
+
+- **Freshness recovery.** The freshness window, the Android staleness classification and its
+  thresholds, and the retry loop live in `src/snapshot/snapshot-freshness/`. The loop is
+  parameterized by a classifier and a retry schedule, so "how long may a backend lag behind a real
+  transition" is a policy input rather than a constant the loop owns. The schedule is stated as a
+  duration budget; the loop derives the deadline from the window's `markedAt` itself, so the
+  budget is always spent from the action and a caller has no absolute instant it could get wrong.
+  `src/daemon/session-snapshot-freshness.ts` keeps only what needs a session: reading and retiring
+  the window on store-owned `SessionState`, and choosing the comparison baseline from snapshot
+  lineage. It remains the declared R7 owner of `androidSnapshotFreshness`.
+- **Timeout evidence.** Whether a capture failed because the hierarchy never arrived is decided
+  once, at the deepest boundary that has the evidence, from machine-defined values only:
+  `snapshot-capture-failure-reason.ts` maps the helper's structured `errorType` field
+  (`java.util.concurrent.TimeoutException`, by exact equality) and the SIGKILL exit code 137 to
+  the typed reason `accessibility-timeout` (`ANDROID_CAPTURE_FAILURE_REASONS` in
+  `@agent-device/contracts/android-snapshot-quality`). The helper-result, session-protocol, and
+  killed-instrumentation error constructors attach it; every layer above rewraps it rather than
+  reclassifying. No message shape is consulted anywhere on that path, so rewording helper or
+  wrapper prose cannot move the reason, and prose that merely reads like a timeout does not become
+  one — both directions are asserted end to end against the real producer.
+  `src/snapshot/snapshot-timeout-policy.ts` reads the reason; the human-facing hint is derived
+  from it rather than decided alongside it.
+
+  The published `details.androidSnapshotTimeoutScreenshot` payload is vocabulary in
+  `@agent-device/contracts/snapshot-timeout-evidence`, a union whose arms encode which claims can
+  coexist. The annotated arm carries a non-empty ref tuple, so "annotated with zero refs" is not a
+  state a caller can build, and no arm stores a ref count: a count beside the refs is a second
+  source of truth the type system cannot hold in step, so it is derived from the refs instead.
+  The daemon keeps the ordering that genuinely needs it: resolving a bound screenshot runtime,
+  writing the artifact, annotating it from the stored observation, and emitting the diagnostics.
+- **Screenshot-overlay policy.** Which Android nodes earn an overlay ref, and what rectangle an
+  overlay for one of them covers, live in `src/snapshot/screenshot-overlay/`. The daemon keeps
+  approved artifact and ref assembly only: ranking, projection to screenshot pixels, drawing, and
+  PNG IO.
+
+`scripts/layering/snapshot-presentation-boundary.test.ts` enforces the direction for the whole
+facet: nothing under `src/snapshot/` may import `src/daemon/`. It carries a positive control,
+because a filter that stopped matching would look identical to a boundary being obeyed.
+
+The residual call sites #1983 also named are audited and deliberately left in place.
+`src/daemon/direct-ios-selector.ts` carries no presentation policy: `isLocalIosRunnerSession` and
+`readSimpleIosSelectorTarget` are session routing (device family, provider ownership, the
+stabilization window), while `deriveDirectIosNodeSelector` and `isDirectIosSelectorFallbackError`
+are selector derivation and ADR 0011 delegation-on-error. The latter two are pure and
+daemon-independent, but their owner would be the selector pipeline governed by R19, not this
+facet; moving them under ADR 0004 would widen it to a boundary it does not decide. The
+observation and interaction consumers — `selector-capture-runtime.ts`,
+`deferred-interaction-outcome.ts`, `snapshot-capture.ts` and
+`interaction-touch-android-freshness.ts` — now reach freshness only through the facet or its
+session binding.
+
+New consumers must use the facet rather than add another daemon presentation path.
 
 ## Regression Notes
 
