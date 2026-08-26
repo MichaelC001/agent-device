@@ -129,6 +129,21 @@ platform-common package, and it preserves the package façades' implementation-l
 Its introduction carries the normal workspace-package compliance surface: `check:affected`
 selection, R11/R13 package enumeration, and the composite typecheck project list.
 
+The Apple XCUITest runner client is a durable platform-owned implementation facet colocated
+inside `packages/platform-apple` as the `src/runner/` subtree (#2040) — Apple mechanics belong to
+the Apple package. R13 models the facet by enumeration rather than by exception sprawl: the family
+exports its root façade plus exactly the `./runner`, `./runner/client`, and `./runner/test-host`
+subpaths; the `./runner` façade subpath is the seam through which daemon and root consumers reach
+runner mechanics directly today; the host-bound `./runner/client` factory has one composition root
+and `./runner/test-host` one vitest installer; the facet owns its cache files and usbmux sockets
+(the ambient-host rule exempts exactly that subtree), while raw process primitives stay banned —
+host authority still enters through one focused injected port (`AppleRunnerHost`: process
+execution, diagnostics, retry, probes, locks, foreground Apple tooling, physical-device control)
+constructed by exactly one composition root. No current issue owns migrating the runner's direct
+consumers behind the composition gateway; if such a migration retires them, the `./runner` seam
+narrows with it, but the facet itself is the intended ownership model, not a temporary exception.
+The declaration mechanism stays apple-specific until another family needs a mechanics facet.
+
 Canonical family, `AppleOS`, public-leaf, and selector identity remain declared in
 `@agent-device/kernel/device`. Platform-module metadata references one canonical family; during
 coexistence the legacy plugin registry derives its family identity from the same declaration rather
