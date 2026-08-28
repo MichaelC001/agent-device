@@ -132,6 +132,41 @@ platform-common package, and it preserves the package façades' implementation-l
 Its introduction carries the normal workspace-package compliance surface: `check:affected`
 selection, R11/R13 package enumeration, and the composite typecheck project list.
 
+> **Amendment (#2082): the substrate below the platform families.** Retiring the shared
+> `src/utils` and `src/platforms` root surfaces (so the family trees can move behind their
+> exports maps) forces every shared file onto a declared domain owner, and the paragraph above
+> is amended to name that layout rather than let capture-kit absorb it:
+>
+> - `@agent-device/host-kit` owns mechanics that act on the host machine, and nothing else. Each
+>   export is one narrow capability port, not a category barrel: `command` (running host
+>   commands), `process` (observing and owning host processes), `diagnostics`, `retry`
+>   (deadline/backoff/sleep), `archive` (bounded extraction and byte limits), `file` (atomic
+>   publishes, locks, path resolution), `request` (request-scoped cancellation and progress),
+>   and `version` (the installed version off disk). Modules under `src/internal/` are reachable
+>   only through a port, and a port may only hold mechanics a consumer of that capability
+>   needs — the eager-closure row per port is what keeps that honest.
+> - A helper that touches no process, file, or environment is not host mechanics and does not
+>   belong here: pure record readers, config-source values, result text, memoization, async
+>   scoping, coordinate validation, and device-scope parsing live in `@agent-device/kernel`
+>   beside its other primitives.
+> - `@agent-device/capture-kit` owns capture, snapshot, and recording behavior — PNG tooling,
+>   screenshot density and pixel diffing, snapshot occlusion, mobile snapshot semantics,
+>   quality verdicts and backend capability tables. Snapshot *behavior* is capture domain, not
+>   contracts vocabulary, and host mechanics are host-kit's, not capture-kit's.
+> - `@agent-device/provision-kit` owns provisioning mechanics — install-artifact acquisition
+>   (local paths, archives, guarded network downloads) and host toolchain probing.
+> - The enforced direction is `kernel < contracts < host-kit < capture-kit < provision-kit <
+>   platform/provider/daemon`.
+> - Contracts stays vocabulary, plan models, and pure classification with no process,
+>   filesystem, or timer mechanics (the existing planted-red gate); platform-specific parsing
+>   stays with its family package and reaches legacy callers through composition, never by a
+>   family importing another owner's internals.
+>
+> Enforcement: each substrate package's exported subpaths are pinned in
+> `package-boundaries.test.ts` (widening fails the gate), the contracts mechanics gate stays
+> planted red, and the `platforms-root-shape` rule rejects any new shared file or directory
+> appearing directly under `src/platforms`.
+
 The Apple XCUITest runner client is a durable platform-owned implementation facet colocated
 inside `packages/platform-apple` as the `src/runner/` subtree (#2040) — Apple mechanics belong to
 the Apple package. R13 models the facet by enumeration rather than by exception sprawl: the family
