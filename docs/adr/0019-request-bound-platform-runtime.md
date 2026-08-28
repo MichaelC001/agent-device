@@ -114,14 +114,13 @@ process primitives outside the shared host-command port. R13 applies these rules
 dynamic, and re-export edges; package-owned tests may import their own public façade. Contracts may
 depend on kernel vocabulary but never on concrete platform packages or daemon implementation types.
 
-Transitional exception (#2041): the Android adb/IME transport cluster (`adb-executor`,
-`ime-lifecycle`, `ime-helper`) lives in `@agent-device/platform-android` behind four registered
-subpaths, with its raw host primitives injected through the package's `adb-host` port by root
-composition wiring. Live root runtime, core interactor, SDK, and test-support consumers still import
-the old root paths, so R13 names an explicit shim table: each subpath is importable only by its root
-re-export shim (plus the host-binding, the helper-install module the binding reaches, and the
-cluster's own tests under `src/platforms/android/__tests__/`). Delete the shims and narrow this table
-only after those consumers move; the table growing is drift, not precedent.
+The Android family mechanics now live entirely in `@agent-device/platform-android`. Its root façade
+remains metadata-only and lazy; the package exports exactly two implementation facets: `./mechanics`
+for named Android behavior consumed by root/core/SDK code and package-owned tests, and `./adb-host`
+for the host port bound only by `src/platform-runtime-android-adb-host.ts`. The old
+`src/platforms/android` family tree and root shims are deleted. R13 enumerates these two facets and
+rejects any additional Android subpath or daemon production import, so package closure and host
+authority stay explicit rather than being restored through compatibility paths.
 
 Durable-capture mechanics shared by more than one implementation live in the private
 `@agent-device/capture-kit` workspace package, with the enforced direction
@@ -184,7 +183,9 @@ execution, diagnostics, retry, probes, locks, foreground Apple tooling, physical
 constructed by exactly one composition root. No current issue owns migrating the runner's direct
 consumers behind the composition gateway; if such a migration retires them, the `./runner` seam
 narrows with it, but the facet itself is the intended ownership model, not a temporary exception.
-The declaration mechanism stays apple-specific until another family needs a mechanics facet.
+Mechanics-facet declarations are explicit per family: the Apple runner and Android mechanics/host
+facets are enumerated above, and a new family adds its own named facet only with an owning consumer
+and evidence.
 
 Canonical family, `AppleOS`, public-leaf, and selector identity remain declared in
 `@agent-device/kernel/device`. Platform-module metadata references one canonical family; during
@@ -678,6 +679,31 @@ code, so its shipped-size delta trends to zero or negative. The unit's review re
 removed against package bytes added; net growth is exceptional and each contributing addition is
 named and justified individually. Contract modules stay vocabulary-thin under the existing
 capture-kit rule; per-unit type inflation is size growth and is reviewed as such.
+
+#### W5 Android family accounting (PR #2117)
+
+The W5 exact-head size report at `9fa2778` against `437465f37` reported these rounded CI values:
+
+| Metric             | Original baseline | W5 head | W5 delta |
+| ------------------ | ----------------: | ------: | -------: |
+| Raw JavaScript     |          2.48 MB | 2.49 MB | +8.2 kB  |
+| Gzipped JavaScript |         835.0 kB | 831.2 kB | -3.9 kB |
+| npm tarball        |         958.5 kB | 959.6 kB | +1.1 kB |
+| npm unpacked       |          3.32 MB | 3.33 MB | +9.0 kB  |
+
+At source level, the moved Android production tree accounts for 456,492 B removed from
+`src/platforms/android` versus 475,413 B in changed package targets, a +18,921 B relocation
+delta; the new root host/facade seam adds 19,978 B. The published +9.0 kB unpacked result is the
+package result, not a source-byte estimate. The increase is attributable to the named `mechanics`
+closure, the injected root host composition, and preserving deferred helper loading while root
+chunks are removed or repartitioned. The largest packed increase is the mechanics chunk; it is
+offset by deletion or shrinkage of the superseded root Android chunks.
+
+A smaller design that retained root re-export shims, a broad barrel, or ambient filesystem/process
+access would reduce gross source movement but violate this ADR's package-closure,
+no-compatibility-shim, named-facet, host-injection, and implementation-lazy constraints. This is
+exceptional W5 accounting, not reusable checkpoint headroom; after rebasing on #2116, the
+combined-family CI size result remains the authoritative current measurement.
 
 Raw per-unit parity, planted-red, and size evidence belongs in #1739 and its PRs; this ADR retains
 the decision, the evidence tiers, and the rule that each unit must justify exceptional growth
