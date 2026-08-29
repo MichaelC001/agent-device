@@ -180,6 +180,10 @@ selection, R11/R13 package enumeration, and the composite typecheck project list
 > planted red, and the `retired-platforms-zone` rule rejects every production, test, or fixture
 > file under the former `src/platforms` path.
 
+The Apple package root is composition-only: it exposes the inventory module, runtime module,
+shutdown loader, and platform plugin. Synchronous consumers use named domain facets instead of a
+second compatibility surface on the root.
+
 The Apple XCUITest runner client is a durable platform-owned implementation facet colocated
 inside `packages/platform-apple` as the `src/runner/` subtree (#2040) — Apple mechanics belong to
 the Apple package. R13 models the package by enumeration rather than by exception sprawl: the family
