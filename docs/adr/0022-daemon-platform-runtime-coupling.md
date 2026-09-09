@@ -41,10 +41,12 @@ or owning issue. #2278 audited all four concerns at `27a97ee619`.
    `device-claim-owner-recovery.ts` → `platform-runtime.ts`;
    `device-ready.ts` → `platform-runtime-device-ready.ts` — process-root assembly of the
    composed gateway, host diagnostics, owner recovery, and device readiness). The remaining
-   nine edges are leaked platform mechanics and are owned by:
-   - **#2332** — Apple runner session observation behind a semantic port
-     (`request-recording-health.ts`, `session-device-resolution.ts`, `ios-app-session-hint.ts`
-     → `inspectAppleRunnerSession` / `resolveSoleForegroundIosApp`).
+   nine edges identified as leaked platform mechanics have these owning interfaces or follow-ups:
+   - **Apple session observation** — the `AppleSessionObservation` contract supplies runner
+     liveness/session identity and the sole-foreground-app observation to recording health,
+     device refresh, and open-hint policy. Root composition supplies request-local inventory
+     and its error classifier; `packages/platform-apple` owns the probes. The three consumers
+     are daemon-policy-essential. Selector production and lifecycle participation stay separate.
    - **#2333** — lifecycle participation of platform resource owners
      (`daemon-runtime.ts` → `platform-runtime-apple-runner-owner.ts`,
      `platform-runtime-resource-cleanup.ts`, and the dynamic
@@ -77,8 +79,8 @@ or owning issue. #2278 audited all four concerns at `27a97ee619`.
     ≤14 target is superseded and not reachable without folding cross-cutting request-scope
     wrappers, which the audit does not endorse.
 
-5. **Per-audit-area decisions.** Apple selector/session observation: deepen an existing
-   interface (#2332). Runtime lifecycle participation: deepen through the existing lifecycle
+5. **Per-audit-area decisions.** Apple session observation: consume the neutral
+   `AppleSessionObservation` contract. Runtime lifecycle participation: deepen through the existing lifecycle
    phases, no generic hook bag (#2333). Open-target planning: separate plan/result from
    platform mechanics, one construction path preserved (#2334). Session state/store authority:
    keep the current access shape, ratchet the handler-owned slice (R75). Route depth: record the
@@ -115,5 +117,5 @@ or owning issue. #2278 audited all four concerns at `27a97ee619`.
   `scripts/layering/check.ts` (both observed red against planted violations before acceptance).
 - R7 `session-state-ownership` and the R10 merge-base ratchet for the owning-module slice.
 - R65 for the concrete-platform-import ban this audit builds on.
-- Child issues #2332, #2333, #2334 (and #2273/#2274 for the selector seam) for the category-3
+- Child issues #2333, #2334 (and #2273/#2274 for the selector seam) for the remaining category-3
   implementation work.
