@@ -172,11 +172,32 @@ type RunnerErrorMatch = {
   code?: AppErrorCode;
   /** Every entry must appear in the lowercased message. */
   messageIncludesAll?: readonly string[];
+  /**
+   * Every entry must appear in the lowercased {@link runnerToolText}: our message plus the tool's
+   * own `stdout`/`stderr`. Nothing else in `details` is read, so the argv we were asked to run and
+   * the verdict this classifier already published can never carry a rule (#2680).
+   */
+  toolTextIncludesAll?: readonly string[];
+  /**
+   * Every entry must appear in the SAME line of the lowercased {@link runnerToolText} (#2688 review).
+   * {@link RunnerErrorMatch.toolTextIncludesAll} proves only that two phrases exist somewhere in a
+   * captured log, which is a weaker claim than one phrase qualifying the other: a note about the
+   * profile the build used, three lines above an unrelated expired-certificate warning, says nothing
+   * about the profile. A row whose evidence is a noun and its complaint asks for both on one line.
+   */
+  toolTextLineIncludesAll?: readonly string[];
   /** Required details evidence beyond code/message. */
   details?: RunnerErrorDetailsMatch;
 };
 
 const hasRetriableFlag: RunnerErrorDetailsMatch = (details) => details.retriable === true;
+/**
+ * The host's own `DevToolsSecurity -status` read, published as typed details by the probe that
+ * takes it. The build-failure rule below keys on this field and never on the probe's message, so
+ * an error that merely says developer mode is disabled cannot be read as a host refusal (#2680).
+ */
+const hasDevToolsSecurityStatus: RunnerErrorDetailsMatch = (details) =>
+  typeof details.devToolsSecurityStatus === 'string';
 const hasUsbmuxDeviceUnattached: RunnerErrorDetailsMatch = (details) =>
   details.usbmuxDeviceAttached === false;
 /**
@@ -203,17 +224,75 @@ type RunnerErrorVerdicts = {
   artifactSuspect?: boolean;
 };
 
+/**
+ * Why the Apple runner could not reach the point of serving a command (#2680). Published in
+ * `details.reason` on the `COMMAND_FAILED` every one of these paths throws, so a caller branches
+ * on the reason instead of matching prose; the hint that answers it travels with it in
+ * {@link RUNNER_ERROR_RULES}.
+ *
+ * This is the vocabulary #2683 adds the device-readiness members to (Developer Mode and developer
+ * disk image state read from the device itself), which is why it is keyed on startup rather than on
+ * `xcodebuild`: an iPhone that refuses the runner for reasons other than signing stops the runner
+ * before a build is ever the question.
+ *
+ * Placement: here beside the rules that produce it, not in `@agent-device/contracts`. Every member
+ * names a verdict an Apple runner path reaches, while `contracts` carries shapes several surfaces
+ * answer with (`InfrastructureBootFailureReason`, which both simulator and device boot use).
+ * Nothing outside this package publishes or consumes this enum, and one declaration is the only way
+ * a row and its reason cannot disagree.
+ */
+export const RUNNER_STARTUP_FAILURE_REASONS = [
+  'bundle_identifier_already_registered',
+  'signing_no_development_team',
+  'signing_provisioning_profile_missing',
+  'signing_unspecified',
+  'devtools_security_developer_mode_disabled',
+  'build_failed_unclassified',
+] as const;
+
+export type RunnerStartupFailureReason = (typeof RUNNER_STARTUP_FAILURE_REASONS)[number];
+
+/**
+ * The reason a startup failure carries when no rule proves a cause. Its hint is deliberately the
+ * cache-recovery advice rather than anything about signing: an unclassified build is not evidence of
+ * a signing problem.
+ */
+export const RUNNER_STARTUP_FAILURE_UNCLASSIFIED_REASON: RunnerStartupFailureReason =
+  'build_failed_unclassified';
+
 type RunnerErrorRule = {
   /** Stable rule name for tests and diagnostics. */
   reason: string;
   match: RunnerErrorMatch;
   verdicts: RunnerErrorVerdicts;
+  /**
+   * Set on the rules that also classify why the runner could not start (#2680). Rules like these
+   * define no recovery verdicts for a runner that never came up — there is no session to invalidate
+   * and nothing was sent to resend — so the axes stay empty and the row carries only reason plus
+   * hint. Several rows may name one reason (bundle-identifier registration fails in two shapes),
+   * and the classifier takes the first match, which is why specific rows precede generic ones.
+   */
+  buildFailure?: {
+    reason: RunnerStartupFailureReason;
+    hint: string;
+  };
+};
+
+/**
+ * The advice the provisioning-profile rows share (#2688). Named once so the three rows that require a
+ * different complaint cannot drift into three different fixes for one lever.
+ */
+const PROFILE_UNUSABLE: RunnerErrorRule['buildFailure'] = {
+  reason: 'signing_provisioning_profile_missing',
+  hint: 'Install/select a valid iOS provisioning profile, or set AGENT_DEVICE_IOS_PROVISIONING_PROFILE.',
 };
 
 /**
  * The one declaration of runner error classes (#1631), mirroring
  * RUNNER_COMMAND_TRAIT_MANIFEST's role for commands: every recovery predicate
- * below derives from this table instead of keeping its own substring chain.
+ * below derives from this table instead of keeping its own substring chain,
+ * and since #2680 so does the one classification of startup failures — a row
+ * carries recovery verdicts, a `buildFailure` reason and hint, or both.
  * Per axis, the FIRST matching rule that defines the axis wins — which is why
  * `flagged_retriable` precedes the denials (an explicitly retriable error
  * stays retriable whatever its message says), and `usbmux_device_unattached`
@@ -304,11 +383,136 @@ export const RUNNER_ERROR_RULES: readonly RunnerErrorRule[] = [
     match: { code: 'RUNNER_WEDGED' },
     verdicts: { sessionFatalReason: 'runner_main_thread_wedged' },
   },
+  // ── Startup classification (#2680) ───────────────────────────────────────────────────────────
+  // These rows answer "why could the runner not get here at all": `xcodebuild build-for-testing`
+  // refusing, and the host preflight that runs before it. They carry a reason and a hint for the
+  // caller and no recovery verdicts, because there is no session to invalidate and nothing was sent
+  // to resend. Specific rows precede generic ones: the classifier takes the first match.
+  //
+  // Why these rows are text matchers while the rows above key on a code or a typed field:
+  // `runnerToolText` reads xcodebuild's own prose because that prose is the only publication these
+  // failures have — there is no code and no typed field to key on. Its haystack is deliberately
+  // narrow: our message plus the tool's stdout/stderr, never the whole details bag, which also
+  // holds the argv we were asked to run (so a caller's own PROVISIONING_PROFILE_SPECIFIER=… would
+  // otherwise name a signing cause for an unrelated compile error) and the reason and hint this
+  // classifier just published (so a re-wrapped failure would match itself). The DevToolsSecurity
+  // row is the other half: where a probe of ours publishes a typed fact, the row keys on that fact
+  // alone. `resolveRunnerEarlyExitHint` stays outside this table for the same reason it stays a hint
+  // builder — it classifies a runner that DID build and then exited early, whose reason axis is the
+  // `BootFailureReason` `classifyBootFailure` already returns, and a build that never produced a
+  // binary has no boot to classify.
+  {
+    reason: 'bundle_identifier_registration_failed',
+    match: { toolTextIncludesAll: ['failed registering bundle identifier'] },
+    verdicts: {},
+    buildFailure: {
+      reason: 'bundle_identifier_already_registered',
+      hint: 'Set AGENT_DEVICE_IOS_BUNDLE_ID to a unique reverse-DNS value (for example, com.yourname.agentdevice.runner), then retry.',
+    },
+  },
+  {
+    // The identifier and its availability have to meet in one line: `App Identifier` and `not
+    // available` are two phrases a captured log can carry for reasons that have nothing to do with
+    // each other, which is the same hazard the profile rows just gave up (#2688 review).
+    reason: 'bundle_identifier_unavailable',
+    match: { toolTextLineIncludesAll: ['app identifier', 'not available'] },
+    verdicts: {},
+    buildFailure: {
+      reason: 'bundle_identifier_already_registered',
+      hint: 'Set AGENT_DEVICE_IOS_BUNDLE_ID to a unique reverse-DNS value (for example, com.yourname.agentdevice.runner), then retry.',
+    },
+  },
+  {
+    reason: 'signing_requires_development_team',
+    match: { toolTextIncludesAll: ['requires a development team'] },
+    verdicts: {},
+    buildFailure: {
+      reason: 'signing_no_development_team',
+      hint: 'Configure signing in Xcode or set AGENT_DEVICE_IOS_TEAM_ID for physical-device runs.',
+    },
+  },
+  {
+    // "conflicting provisioning settings" names a profile while saying the automatic and manual
+    // settings disagree, so without this row the profile row below would send the reader to install
+    // a profile for a problem that is a settings mismatch. No reason is claimed for it: nothing has
+    // captured this failure or proved which lever clears it, and advice the reader cannot follow is
+    // worse than the cache-recovery advice the unclassified path already gives (#2680).
+    reason: 'conflicting_provisioning_settings_unproven',
+    match: { toolTextIncludesAll: ['conflicting provisioning settings'] },
+    verdicts: {},
+    buildFailure: {
+      reason: RUNNER_STARTUP_FAILURE_UNCLASSIFIED_REASON,
+      hint: RUNNER_CACHE_RECOVERY_HINT,
+    },
+  },
+  {
+    // "No profiles for 'com.example' were found" names the bundle id and the absence in one sentence,
+    // so the phrase alone is the complaint and needs no second phrase to qualify it.
+    reason: 'signing_no_profiles_for_bundle_id',
+    match: { toolTextIncludesAll: ['no profiles for'] },
+    verdicts: {},
+    buildFailure: PROFILE_UNUSABLE,
+  },
+  // A profile named in the tool's output is only evidence when the output also says what is wrong with
+  // that profile, in the same line (#2688 review). One bare `provisioning profile` substring was the
+  // shipped sniffer's trigger, and it is a phrase a failing build can print while talking about
+  // something else: the codesign command line, a build-settings dump, a note about the profile that was
+  // used. Requiring a second phrase somewhere in the same log is no better — a note about the profile
+  // used above an unrelated `has expired` certificate warning would then name the profile. Each row
+  // below therefore asks for the profile and Xcode's complaint about it on one line, and a failure that
+  // merely mentions a profile stays unclassified rather than being sent to install one it already has.
+  {
+    // Xcode's own signing-error domain beside the profile it rejected: the machine-readable half of its
+    // `IDEProvisioningErrorDomain` diagnostics, which accompanies the prose rather than replacing it.
+    reason: 'signing_provisioning_profile_xcode_error',
+    match: { toolTextLineIncludesAll: ['provisioning profile', 'ideprovisioningerrordomain'] },
+    verdicts: {},
+    buildFailure: PROFILE_UNUSABLE,
+  },
+  {
+    // "Provisioning profile \"X\" doesn't include application identifier ..." — the profile that is
+    // installed but does not cover this app or capability.
+    reason: 'signing_provisioning_profile_does_not_cover',
+    match: { toolTextLineIncludesAll: ['provisioning profile', "doesn't include"] },
+    verdicts: {},
+    buildFailure: PROFILE_UNUSABLE,
+  },
+  {
+    // "Provisioning profile \"X\" has expired" — installing it again is not the fix; replacing it is,
+    // which is what the hint's "valid" is for. The full phrase, on the profile's own line: `expired`
+    // alone is what an expired certificate, a stale session, or a revoked key writes (#2688 review).
+    reason: 'signing_provisioning_profile_expired',
+    match: { toolTextLineIncludesAll: ['provisioning profile', 'has expired'] },
+    verdicts: {},
+    buildFailure: PROFILE_UNUSABLE,
+  },
+  {
+    // Signing is involved but nothing above names how: the reason says signing and the hint stays
+    // the generic one it has always carried, rather than naming a misconfiguration no rule proved.
+    reason: 'signing_unspecified',
+    match: { toolTextIncludesAll: ['code signing'] },
+    verdicts: {},
+    buildFailure: {
+      reason: 'signing_unspecified',
+      hint: 'Enable Automatic Signing in Xcode or provide AGENT_DEVICE_IOS_TEAM_ID and optional AGENT_DEVICE_IOS_SIGNING_IDENTITY.',
+    },
+  },
+  {
+    reason: 'devtools_security_refused',
+    match: { code: 'COMMAND_FAILED', details: hasDevToolsSecurityStatus },
+    verdicts: {},
+    buildFailure: {
+      reason: 'devtools_security_developer_mode_disabled',
+      hint: 'Run `sudo DevToolsSecurity -enable`, then retry the iOS runner. UI test runners start suspended until Xcode/testmanagerd can attach.',
+    },
+  },
 ];
 
 function matchesRunnerErrorRule(error: AppError, match: RunnerErrorMatch): boolean {
   if (match.code !== undefined && error.code !== match.code) return false;
   if (!matchesRunnerErrorDetails(error, match.details)) return false;
+  if (!matchesRunnerToolText(error, match.toolTextIncludesAll)) return false;
+  if (!matchesRunnerToolTextLine(error, match.toolTextLineIncludesAll)) return false;
   return matchesRunnerErrorMessage(error, match.messageIncludesAll);
 }
 
@@ -321,6 +525,38 @@ function matchesRunnerErrorMessage(error: AppError, parts: readonly string[] | u
   if (!parts) return true;
   const message = `${error.message ?? ''}`.toLowerCase();
   return parts.every((part) => message.includes(part));
+}
+
+/**
+ * The only text a startup rule may read: our message plus the tool's own `stdout` and `stderr`
+ * (#2680). The rest of `details` is deliberately out of reach — `cmd`/`args` describe what we were
+ * asked to run, and `reason`/`hint` are this classifier's own output, which a re-wrapped failure
+ * would otherwise find and match again.
+ */
+function runnerToolText(error: AppError): string {
+  const details = error.details ?? {};
+  return [error.message, details.stdout, details.stderr]
+    .filter((part): part is string => typeof part === 'string')
+    .join('\n')
+    .toLowerCase();
+}
+
+function matchesRunnerToolText(error: AppError, parts: readonly string[] | undefined): boolean {
+  if (!parts) return true;
+  const text = runnerToolText(error);
+  return parts.every((part) => text.includes(part));
+}
+
+/**
+ * The same haystack read one line at a time, so a row can require its phrases to be in one sentence
+ * rather than merely in one file (#2688 review). A captured build log is thousands of lines long, and
+ * two unrelated lines can hold any pair of words.
+ */
+function matchesRunnerToolTextLine(error: AppError, parts: readonly string[] | undefined): boolean {
+  if (!parts) return true;
+  return runnerToolText(error)
+    .split('\n')
+    .some((line) => parts.every((part) => line.includes(part)));
 }
 
 function runnerErrorVerdict<Axis extends keyof RunnerErrorVerdicts>(
@@ -599,29 +835,32 @@ export async function buildRunnerEarlyExitError(params: {
   });
 }
 
-function resolveSigningFailureHint(error: AppError): string | undefined {
-  const details = error.details ? JSON.stringify(error.details) : '';
-  const combined = `${error.message}\n${details}`.toLowerCase();
-  if (
-    combined.includes('failed registering bundle identifier') ||
-    (combined.includes('app identifier') && combined.includes('not available'))
-  ) {
-    return 'Set AGENT_DEVICE_IOS_BUNDLE_ID to a unique reverse-DNS value (for example, com.yourname.agentdevice.runner), then retry.';
+/**
+ * The one classifier for "the runner did not reach the point of serving a command" (#2680). Every
+ * path that stops the runner before it answers a request routes its failure through here, so the
+ * reason a caller sees is produced by the same rows that produce the hint beside it — a reason is
+ * never inferred from a hint's wording, and an unproven cause is never claimed.
+ *
+ * Callers publish the pair as `details.reason` plus the top-level hint on a `COMMAND_FAILED`; the
+ * code is `COMMAND_FAILED` for every reason, so the reason is the assertion.
+ */
+export function classifyRunnerStartupFailure(error: unknown): {
+  reason: RunnerStartupFailureReason;
+  hint: string;
+} {
+  if (error instanceof AppError) {
+    for (const rule of RUNNER_ERROR_RULES) {
+      const buildFailure = rule.buildFailure;
+      if (!buildFailure) continue;
+      if (matchesRunnerErrorRule(error, rule.match)) {
+        return { reason: buildFailure.reason, hint: buildFailure.hint };
+      }
+    }
   }
-  if (combined.includes('requires a development team')) {
-    return 'Configure signing in Xcode or set AGENT_DEVICE_IOS_TEAM_ID for physical-device runs.';
-  }
-  if (combined.includes('no profiles for') || combined.includes('provisioning profile')) {
-    return 'Install/select a valid iOS provisioning profile, or set AGENT_DEVICE_IOS_PROVISIONING_PROFILE.';
-  }
-  if (combined.includes('code signing')) {
-    return 'Enable Automatic Signing in Xcode or provide AGENT_DEVICE_IOS_TEAM_ID and optional AGENT_DEVICE_IOS_SIGNING_IDENTITY.';
-  }
-  return undefined;
-}
-
-export function resolveRunnerBuildFailureHint(error: AppError): string {
-  return resolveSigningFailureHint(error) ?? RUNNER_CACHE_RECOVERY_HINT;
+  return {
+    reason: RUNNER_STARTUP_FAILURE_UNCLASSIFIED_REASON,
+    hint: RUNNER_CACHE_RECOVERY_HINT,
+  };
 }
 
 export function withRunnerCommandId(command: RunnerCommand): RunnerCommand {
