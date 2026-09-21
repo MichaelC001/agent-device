@@ -219,11 +219,20 @@ async function runMacOsSurfacePress(
     );
   }
   const { runMacOsPressAction } = await import('./os/macos/helper.ts');
-  await runMacOsPressAction(point.x, point.y, {
+  // `count` is independent presses and `doubleTap` raises the click state inside each one,
+  // the same reading every other platform gives the two flags.
+  const posted = await runMacOsPressAction(point.x, point.y, {
     bundleId: context.appBundleId,
     surface: options.surface,
+    holdMs: options.holdMs,
+    clicks: options.count,
+    doubleClick: options.doubleTap,
+    intervalMs: options.intervalMs,
+    signal: context.signal,
   });
-  return {};
+  // A hold shorter than what macOS delivers is raised before it is posted, so the
+  // response carries the hold the helper actually used rather than the request.
+  return posted.holdMs === undefined ? {} : { holdMs: posted.holdMs };
 }
 
 async function runAppleAlternateClick(
