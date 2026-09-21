@@ -1,4 +1,4 @@
-# Runner-failure evidence checklist (#2680, #2683)
+# Device evidence checklist
 
 Live evidence the coordinator runs serially on the connected iPhone. Each item names the exact
 command, the environment it needs, and the rendered error that proves the change. Do not paraphrase
@@ -100,8 +100,132 @@ said what was wrong with it) or `build_failed_unclassified` — which is also wh
 mentions the profile it used gets, since a name is not a complaint (#2688 review). Paste the error and the `xcodebuild -version` either way: a
 capture of the conflicting-settings line is what would let a follow-up name the cause, and the
 capture must show which build setting disagrees before any hint naming a lever is written.
+## #2683 — device-readiness facts from `devicectl device info details`
 
-## Results — coordinator run, 2026-09-20
+Build the CLI first, and stop any warm daemon so the run is on this commit (same preamble as the
+#2680 section above).
+
+### 1. Both facts are readable, and they are two facts
+
+```sh
+xcrun devicectl device info details --device "<udid>" --json-output /tmp/device-details.json
+node -e 'const d=require("/tmp/device-details.json").result.deviceProperties;console.log(JSON.stringify({developerModeStatus:d.developerModeStatus,ddiServicesAvailable:d.ddiServicesAvailable}))'
+xcodebuild -version
+```
+
+Expected: `{"developerModeStatus":"enabled","ddiServicesAvailable":true}` on a healthy device, plus
+the Xcode version. Also record `bootState` and `tunnelState` from the same file: those two are what
+make a `ddiServicesAvailable: false` an answer at all rather than a device that was not listening.
+
+`packages/platform-apple/src/core/__tests__/fixtures/ios-device-info-details.json` holds this payload
+and `packages/platform-apple/src/runner/__tests__/runner-startup-failure-fixtures.ts` records the two
+state pairings, both at `invented-shape` until this capture moves them to `captured`. Paste the raw
+values rather than a summary.
+
+The committed payload is masked, and the mask is a rule with a test, not a one-time edit:
+`hardwareProperties.serialNumber` and `deviceProperties.bootedSnapshotName` carry `MASKED`,
+`hardwareProperties.ecid` is `0`, and `connectionProperties.tunnelIPAddress` is a documentation-only
+`fd00:` address. Everything the reader consumes — the toggle, the image, `bootState`, `tunnelState`,
+OS build — stays verbatim. If you refresh this capture, apply the same mask in both the `result`
+block and the mirrored `properties` block, and leave the states alone.
+
+### 2. A healthy device is left alone
+
+```sh
+node --experimental-strip-types src/bin.ts --json   prepare ios-runner --platform ios --device "<physical iPhone name>"
+```
+
+Expected: success as before, and a `ios_runner_session_startup` diagnostic whose timings include
+`verify_device_readiness`. No reason may appear on a healthy device: the probe reads, it does not
+guess. Record the `verify_device_readiness` duration next to `verify_host_dev_tools_security`.
+
+### 3. Developer Mode off on the device -> `device_developer_mode_disabled`
+
+Turn the toggle off on a device you are willing to re-pair (Settings > Privacy & Security >
+Developer Mode, then restart), and rerun the `prepare ios-runner` command above.
+
+Expected: exit non-zero with
+
+```json
+{
+  "code": "COMMAND_FAILED",
+  "message": "The iOS device reports that Developer Mode is turned off",
+  "details": {
+    "reason": "device_developer_mode_disabled",
+    "developerMode": "disabled",
+    "developerDiskImage": "unavailable"
+  }
+}
+```
+
+`hint` is top-level and names `Settings > Privacy & Security > Developer Mode`. Record what
+`developerDiskImage` says; either value is acceptable as long as the toggle stays the reason.
+
+### 4. Developer disk image down with the toggle on -> carried onto the failure, not a refusal
+
+This is the pairing the old hint got wrong, so it is the evidence that matters. Reach it with a
+device whose iOS build is newer than the installed Xcode supports, or before Xcode finishes
+installing device support for a freshly paired phone, with Developer Mode on.
+
+This state does NOT stop the run before the build (#2683 review): since iOS 17 CoreDevice mounts the
+personalized disk image on demand during build and launch, a phone that has just been rebooted reports
+the image down while the very next build clears it. Run the `prepare ios-runner` command above and
+record which of the two outcomes you get — both are evidence, and the second one is the reason the
+pre-build refusal was removed:
+
+- **The build clears it**: the command succeeds. Paste the `ios_runner_session_startup` timings showing
+  `verify_device_readiness` ran and `ensure_xctestrun` followed it. Nothing may name device support.
+- **The build fails and names no cause of its own**: `details.reason` is
+  `device_developer_disk_image_unavailable` and `details.developerDiskImage` is `unavailable`, and the
+  hint names device support WITHOUT mentioning `Settings > Privacy & Security`.
+- **The build fails and names its own cause** (e.g. `signing_no_development_team`): that reason wins and
+  `details.developerDiskImage` is still `unavailable`. The device state never overwrites xcodebuild's
+  sentence.
+
+If the toggle reason appears here instead, that is the bug this issue exists to fix: paste the whole
+error and the `/tmp/device-details.json` payload rather than adjusting a rule.
+
+Capture the details payload at the same moment as the run, and check it says `tunnelState:
+"connected"` and `bootState: "booted"`. A `ddiServicesAvailable: false` read any other way is not this
+case: an asleep or unreachable device has the same field and no obstacle, and the run must not name
+device support for it. The hint you get here is the one `core/devicectl.ts` owns and the device report
+carries, so it is worded identically to the hint `devicectl` output produces for the same complaint —
+paste both strings and confirm they match character for character.
+
+### 5. A device that cannot be read claims nothing
+
+Unplug the iPhone (or shut it down) after a session exists, then rerun the `prepare ios-runner`
+command.
+
+Expected: the failure names whatever the transport could not reach, and no `details.reason` of
+`device_developer_mode_disabled` or `device_developer_disk_image_unavailable` appears anywhere in the
+error. An unreadable device is never diagnosed. This is also the case that catches a sleeping phone
+reporting `ddiServicesAvailable: false`: if the hint here says `Let Xcode finish preparing this
+device`, the corroboration rule has been lost, and pasting the payload with its `tunnelState` and
+`bootState` is the evidence — do not adjust the rule to make the run pass.
+
+### 6. A device and a Mac that are both wrong publish the device's reason
+
+With the iPhone's Developer Mode toggle off AND `sudo DevToolsSecurity -status` reporting the
+developer-tools setting disabled, run the `prepare ios-runner` command.
+
+Expected: one error, whose `details.reason` is `device_developer_mode_disabled`. The Mac's reason is
+the other one (`devtools_security_developer_mode_disabled`) and must not be what you get: the phone's
+fix needs no admin rights on the Mac, so the probe that can be acted on has to be the one that speaks.
+Record which of the two appears; a captured pairing here is what would let a follow-up drop the
+ordering argument.
+
+### 7. Log evidence belongs to the command that wrote it (optional, needs a crash repro)
+
+Run any command that crashes the app under test, then a second command that fails for its own
+reason (for example a selector that no longer exists).
+
+Expected: the second error carries no `details.runnerFailureReason`. Before this change it inherited
+`target_app_axruntime_coretext_crash` from the first command's lines in `runner.log`. If the repro
+is not reachable, say so; the pairing is covered by
+`packages/platform-apple/src/runner/__tests__/runner-failure-diagnostics.test.ts`.
+
+## Results — coordinator run, 2026-09-20 (both families)
 
 Built from `15808ae228` on `thymikee-iphone` (iPhone 17 Pro, iOS 27.0, build 24A437), cabled.
 
@@ -111,7 +235,7 @@ Xcode 26.2
 Build version 17C52
 ```
 
-Section 3 is captured. A device build pointed at a team with no certificate, on a fresh derived
+#2680 §3 is captured. A device build pointed at a team with no certificate, on a fresh derived
 path so no cached artifact short-circuits it, reaches signing and fails with one long `error:` line
 per target:
 
@@ -125,7 +249,7 @@ per target:
 answers the wrapping question the rows were held on: the matched phrase arrives inside one `error:`
 line, so the sibling rows in the same provisioning family do not split the way a wrapped line would.
 
-Sections 1 and 2 are blocked on this account, and the mechanism is worth recording because it is the
+The #2680 sections 1 and 2 are blocked on this account, and the mechanism is worth recording because it is the
 same for all of them: against a signed-in account with a valid identity, `xcodebuild` is invoked with
 `-allowProvisioningUpdates`, so the build either signs successfully or dies earlier than the
 diagnostic a row keys on.
@@ -134,7 +258,7 @@ diagnostic a row keys on.
   installed identity and reuses an installed team profile. So section 1's `signing_no_development_team`
   cannot be induced here; it needs an account signed in with no development team.
 - `AGENT_DEVICE_IOS_BUNDLE_ID=com.apple.TestFlight` **succeeds** for the same reason, and a bogus
-  `AGENT_DEVICE_IOS_PROVISIONING_PROFILE` is repaired rather than honoured. So section 2's
+  `AGENT_DEVICE_IOS_PROVISIONING_PROFILE` is repaired rather than honoured. So §2's
   `bundle_identifier_already_registered` needs an app id owned by a different team that automatic
   signing cannot register.
 - The same gating applies to `bundle_identifier_unavailable` (`App Identifier` + `not available`),
@@ -143,6 +267,44 @@ diagnostic a row keys on.
   which this account will not produce. Recorded beside the fixtures in
   `runner-startup-failure-fixtures.ts` so the rows read as host-gated, not unexamined.
 
-Section 4 needs a build that fails for an unrelated reason while naming no signing fact; the
+#2680 §4 needs a build that fails for an unrelated reason while naming no signing fact; the
 classifier's behaviour there is pinned by `runner-startup-failure-reasons.test.ts` and needs no
 device claim to hold.
+
+### #2683 — what the phone actually reported
+
+Developer Mode off, same device, `prepare ios-runner --platform ios --json`:
+
+```
+"deviceProperties": { "developerModeStatus": "disabled", "ddiServicesAvailable": true }
+
+details.reason  device_developer_mode_disabled
+details.deviceReadiness { developerMode: "disabled", developerDiskImage: "available" }
+hint            Enable Developer Mode on the iOS device (Settings > Privacy & Security >
+                Developer Mode), restart it when prompted, unlock it, then retry.
+```
+
+The recognised spelling is the device's own lowercase `"disabled"`, so the one refusal
+`preflightIosRunnerDeviceReadiness` raises is proven rather than inferred, and an unrecognised
+spelling is no longer a live risk for this state.
+
+Image-down was reached by rebooting and holding the phone locked, watching `devicectl` until
+`ddiServicesAvailable` read `false` while `bootState` was `booted`. Two findings from it:
+
+- The state is only reachable **while locked**. `ddiServicesAvailable` flips back to `true` within
+  seconds of unlock, so an unlocked image-down device does not exist on iOS 27 and the capture this
+  checklist asked for cannot be produced on it.
+- Inside that window `prepare` fails at the connect stage — `Runner did not accept connection
+  (xcodebuild exited early)`, exit 70 — and publishes no `developerDiskImage`. A rerun at `eaf411e`,
+  where both connect-stage failures carry the device states, gave the same error, exit 70 and
+  `IOS_RUNNER_CONNECT_TIMEOUT` with no `developerDiskImage`. The cause is the observability rule, not
+  the call site. Before the first unlock the tunnel never comes up: every `devicectl device info
+  details` read from 10:56 to 10:58 UTC, before and after that run, said `tunnelState: "unavailable"`,
+  `bootState: "booted"`, `ddiServicesAvailable: false`. So `readDeviceReadiness` returns
+  `available: false`, the session has no device states, and there is nothing to carry. On iOS 27 a
+  locked phone does not publish its image state at all. The connect-stage enrichment carries the
+  fact only when the preflight could observe it (tunnel connected, device booted).
+
+The host-deadline invariant also held under a real device fault: on a 25s budget the same
+image-down state produced `details.reason: prepare_deadline_expired` with **no** device reason and no
+readiness facts, across every sample of two separate windows.

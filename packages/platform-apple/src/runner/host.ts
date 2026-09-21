@@ -105,6 +105,17 @@ export type AppleRunnerHost = Pick<
 /** The runner's deadline type is the host's read side; the {@link Deadline} shim below builds them. */
 export type Deadline = HostRetry.DeadlineClock;
 
+/**
+ * What an iPhone reports about its own fitness to host development tooling (#2683), under the name the
+ * module that reads it owns. Re-exported rather than restated or re-derived, so the runner, its tests,
+ * and the core reader all speak one type for one device report.
+ */
+export type {
+  IosDeveloperDiskImageState,
+  IosDeveloperModeState,
+  IosDeviceReadiness,
+} from '../core/physical-device-coredevice.ts';
+
 let boundHost: AppleRunnerHost | undefined;
 
 /**

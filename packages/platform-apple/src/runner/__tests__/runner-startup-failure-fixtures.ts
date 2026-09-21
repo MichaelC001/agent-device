@@ -1,5 +1,10 @@
 import { AppError } from '@agent-device/kernel/errors';
-import type { RunnerStartupFailureReason } from '../runner-contract.ts';
+import type {
+  RunnerDeviceReadinessFailureReason,
+  RunnerStartupFailureReason,
+} from '../runner-contract.ts';
+import { RUNNER_DEVICE_READINESS_FAILURE_REASONS } from '../runner-contract.ts';
+import type { IosPhysicalDeviceRunnerControl } from '../../core/physical-device-routing.ts';
 
 /**
  * Recorded startup failures for {@link classifyRunnerStartupFailure} (#2680).
@@ -35,14 +40,38 @@ import type { RunnerStartupFailureReason } from '../runner-contract.ts';
  * read as waiting on effort this machine can supply.
  */
 
-export type RunnerStartupFailureSite = 'build-for-testing' | 'host-dev-tools-security';
+export type RunnerStartupFailureSite =
+  | 'build-for-testing'
+  | 'host-dev-tools-security'
+  | 'device-readiness';
+
+/**
+ * The two states a device reports about itself (#2683), in the shape `readIosDeviceReadiness`
+ * publishes them. They are recorded as states rather than as payload text because the states are the
+ * evidence: the payload they came from is captured in
+ * `packages/platform-apple/src/core/__tests__/fixtures/ios-device-info-details.json`.
+ */
+/**
+ * The two states a device payload carries. `remedies` is left out on purpose: that wording is ours and
+ * arrives on the report, so a fixture that recorded it would be recording our own advice as if the
+ * phone had said it.
+ */
+export type IosDeviceReadinessReport = Omit<
+  Extract<
+    Awaited<ReturnType<IosPhysicalDeviceRunnerControl['readDeviceReadiness']>>,
+    {
+      available: true;
+    }
+  >,
+  'available' | 'remedies'
+>;
 
 /**
  * Whether the text reaches the build catch inside the exec error's `details` (`exec-details`, which
  * is how a non-zero `xcodebuild` arrives) or only in the thrown message (`message-only`, which is
  * how anything the exec layer raised as a plain `Error` arrives after the catch wraps `String(err)`).
  */
-export type RunnerStartupFailureCarrier = 'exec-details' | 'message-only';
+export type RunnerStartupFailureCarrier = 'exec-details' | 'message-only' | 'host-timeout';
 
 const UNOBSERVED = 'unobserved';
 
@@ -54,6 +83,8 @@ export type RunnerStartupFailureFixture = Readonly<{
   /** Which throw site receives this output. */
   site: RunnerStartupFailureSite;
   carrier?: RunnerStartupFailureCarrier;
+  /** The deadline the host killed this command at, for the `host-timeout` carrier. */
+  hostTimeoutMs?: number;
   /** The invocation that produced {@link RunnerStartupFailureFixture.output}, once one is recorded. */
   command?: string;
   /** `xcodebuild -version` recorded from that run, or `unobserved`. */
@@ -63,9 +94,19 @@ export type RunnerStartupFailureFixture = Readonly<{
   output: string;
   /** The argv the exec reported, which is never evidence of a cause (#2680). */
   args?: readonly string[];
+  /**
+   * The device's own states. On the `device-readiness` site this is the evidence the preflight reads;
+   * on a `build-for-testing` entry it is what the startup carried onto that build, which is the pairing
+   * the corroborated disk-image reason depends on (#2683).
+   */
+  deviceReport?: IosDeviceReadinessReport;
   /** What the pending capture still has to show, and how to reach it. */
   note?: string;
 }>;
+
+/** The one command the `device-readiness` site runs, spelled out by `readIosDeviceReadiness`. */
+const DEVICE_INFO_DETAILS_COMMAND =
+  'xcrun devicectl device info details --device <udid> --json-output <file> --timeout 10';
 
 export const RUNNER_STARTUP_FAILURE_FIXTURES: readonly RunnerStartupFailureFixture[] = [
   {
@@ -230,6 +271,74 @@ export const RUNNER_STARTUP_FAILURE_FIXTURES: readonly RunnerStartupFailureFixtu
     note: 'The cross-line hazard a whole-log AND cannot see (#2688 review): a benign profile note three lines above an unrelated expired-certificate warning. Both phrases are in the captured log and neither qualifies the other, so the profile stays unclassified and the reader keeps cache-recovery advice rather than being sent to replace a profile that is fine.',
   },
   {
+    id: 'unclassified-build-on-device-with-image-down',
+    reason: 'device_developer_disk_image_unavailable',
+    site: 'build-for-testing',
+    xcodeVersion: UNOBSERVED,
+    provenance: 'invented-shape',
+    output:
+      "error: cannot find 'AgentDeviceRunnerCommand' in scope (in target 'AgentDeviceRunnerUITests' from project 'AgentDeviceRunner')\n** TEST BUILD FAILED **\n",
+    deviceReport: { developerMode: 'enabled', developerDiskImage: 'unavailable' },
+    note: 'The corroborated pairing (#2683 review): a build that names no cause, on a phone core read directly as reporting its image down. Naming the image beats cache-recovery advice; the state also travels as details.developerDiskImage.',
+  },
+  {
+    id: 'host-killed-build-on-device-with-image-down',
+    reason: 'build_failed_unclassified',
+    site: 'build-for-testing',
+    carrier: 'host-timeout',
+    hostTimeoutMs: 900_000,
+    xcodeVersion: UNOBSERVED,
+    provenance: 'invented-shape',
+    output:
+      "note: Using target 'AgentDeviceRunner' for build-for-testing\nbuilding project 'AgentDeviceRunner' toward destination 'Example iPhone'\nCompileSwiftFile normal (in target 'AgentDeviceRunner' from project 'AgentDeviceRunner')\n",
+    deviceReport: { developerMode: 'enabled', developerDiskImage: 'unavailable' },
+    note: "The build the host killed at its own `buildTimeoutMs`, on a phone reporting its image down (#2690 review). A slow build and a build the device refuses are different facts, and the second one is not available from a command that never finished: the reason stays unclassified with cache-recovery advice, and the image state rides along as a detail only. The shape follows the exec layer's timeout error; the 15-minute budget and the partial log are ours, so no capture stands behind them.",
+  },
+  {
+    id: 'conflicting-settings-on-device-with-image-down',
+    reason: 'build_failed_unclassified',
+    site: 'build-for-testing',
+    xcodeVersion: UNOBSERVED,
+    provenance: 'invented-shape',
+    output:
+      "error: \"AgentDeviceRunner\" has conflicting provisioning settings (in target 'AgentDeviceRunner' from project 'AgentDeviceRunner')\n** TEST BUILD FAILED **\n",
+    deviceReport: { developerMode: 'enabled', developerDiskImage: 'unavailable' },
+    note: 'The pairing that made the enrichment key on "did a row match" rather than on the unclassified reason (#2690 review): a just-rebooted phone reports its image down while the failure is a settings disagreement a row already looked at and declined to name. The row answer wins and the cache-recovery hint stays; the image state still rides along as a detail.',
+  },
+  {
+    id: 'team-id-failure-on-device-with-image-down',
+    reason: 'signing_no_development_team',
+    site: 'build-for-testing',
+    xcodeVersion: UNOBSERVED,
+    provenance: 'shipped-sniff-trigger',
+    output:
+      "error: Signing for \"AgentDeviceRunner\" requires a development team (in target 'AgentDeviceRunner' from project 'AgentDeviceRunner')\n** TEST BUILD FAILED **\n",
+    deviceReport: { developerMode: 'enabled', developerDiskImage: 'unavailable' },
+    note: "A build that named its own cause keeps it: a corroborated device state never overwrites xcodebuild's own sentence (#2683).",
+  },
+  {
+    id: 'device-mode-off',
+    reason: 'device_developer_mode_disabled',
+    site: 'device-readiness',
+    command: DEVICE_INFO_DETAILS_COMMAND,
+    xcodeVersion: UNOBSERVED,
+    provenance: 'invented-shape',
+    output: '"developerModeStatus" : "disabled",\n"ddiServicesAvailable" : false,\n',
+    deviceReport: { developerMode: 'disabled', developerDiskImage: 'unavailable' },
+    note: 'Both states bad, which is what a phone with the toggle off looks like: the toggle has to be the reason named, since it explains the image. No device with the toggle off has been captured.',
+  },
+  {
+    id: 'device-disk-image-down',
+    reason: 'device_developer_disk_image_unavailable',
+    site: 'device-readiness',
+    command: DEVICE_INFO_DETAILS_COMMAND,
+    xcodeVersion: UNOBSERVED,
+    provenance: 'invented-shape',
+    output: '"developerModeStatus" : "enabled",\n"ddiServicesAvailable" : false,\n',
+    deviceReport: { developerMode: 'enabled', developerDiskImage: 'unavailable' },
+    note: 'The decisive pairing, and the one #2682 used to answer with Developer Mode advice: the toggle is on and only the image is down. It is NOT a pre-build refusal (#2683 review): iOS 17+ mounts the image on demand during build and launch, so this report has to survive to a failure — which is what `unclassified-build-on-device-with-image-down` records. The enabled half is captured on some devices; a device waiting on device support has not been captured.',
+  },
+  {
     id: 'devtools-security-disabled',
     reason: 'devtools_security_developer_mode_disabled',
     site: 'host-dev-tools-security',
@@ -251,6 +360,28 @@ export function buildFixtureById(id: string): RunnerStartupFailureFixture {
   return fixture;
 }
 
+/** A recorded device report, narrowed to the reasons the device can name about itself. */
+export type IosDeviceReadinessFixture = RunnerStartupFailureFixture & {
+  reason: RunnerDeviceReadinessFailureReason;
+  site: 'device-readiness';
+  deviceReport: IosDeviceReadinessReport;
+};
+
+/** The recorded device reports, which the runner preflight reads instead of any tool's text. */
+export function deviceReadinessFixtures(): IosDeviceReadinessFixture[] {
+  return RUNNER_STARTUP_FAILURE_FIXTURES.filter(isDeviceReadinessFixture);
+}
+
+function isDeviceReadinessFixture(
+  fixture: RunnerStartupFailureFixture,
+): fixture is IosDeviceReadinessFixture {
+  return (
+    fixture.site === 'device-readiness' &&
+    fixture.deviceReport !== undefined &&
+    (RUNNER_DEVICE_READINESS_FAILURE_REASONS as readonly string[]).includes(fixture.reason)
+  );
+}
+
 /**
  * What the exec layer hands the build-failure catch: for `exec-details` a COMMAND_FAILED carrying
  * the tool's output and the argv in `details` (`execFailureDetails` shape), and for `message-only`
@@ -262,6 +393,17 @@ export function buildForTestingExecFailure(
 ): unknown {
   if ((fixture.carrier ?? 'exec-details') === 'message-only') {
     return new Error(`xcodebuild exited with code ${exitCode}: ${fixture.output}`);
+  }
+  if (fixture.carrier === 'host-timeout') {
+    // The exec layer's own kill-at-deadline error, which `isCommandTimeoutError` answers for.
+    const timeoutMs = fixture.hostTimeoutMs ?? 900_000;
+    return new AppError('COMMAND_FAILED', `xcodebuild timed out after ${timeoutMs}ms`, {
+      cmd: 'xcodebuild',
+      args: fixture.args ?? ['build-for-testing'],
+      stdout: fixture.output,
+      stderr: '',
+      timeoutMs,
+    });
   }
   return new AppError('COMMAND_FAILED', `xcodebuild exited with code ${exitCode}`, {
     stdout: fixture.output,

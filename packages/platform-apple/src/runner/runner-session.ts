@@ -36,6 +36,7 @@ import {
   type RunnerCommand,
   resolveRunnerFatalErrorReason,
   isRunnerMainThreadOccupiedError,
+  enrichRunnerStartupFailureWithDeviceStates,
 } from './runner-contract.ts';
 import {
   canSkipRunnerReadinessPreflightAfterHealthyMutation,
@@ -62,7 +63,11 @@ import {
   stopRunnerPrepProcesses,
   type RunnerDisposalOptions,
 } from './runner-disposal.ts';
-import { enrichRunnerFailureFromLog } from './runner-failure-diagnostics.ts';
+import {
+  captureRunnerLogAttempt,
+  enrichRunnerFailureFromLog,
+  type RunnerLogAttempt,
+} from './runner-failure-diagnostics.ts';
 import {
   advanceRunnerSessionState,
   buildRunnerSessionId,
@@ -145,6 +150,9 @@ export async function ensureRunnerSession(
   });
 }
 
+/** How long the device-readiness probe may take, bounded by the startup budget it runs inside. */
+const RUNNER_DEVICE_READINESS_BUDGET_MS = 10_000;
+
 async function startRunnerSessionWithLease(
   device: DeviceInfo,
   options: RunnerSessionOptions,
@@ -186,10 +194,28 @@ async function startRunnerSessionWithLease(
   await measureRunnerStartupStep(startupTimings, 'ensure_booted', async () => {
     await ensureBootedIfNeeded(device);
   });
+  // Device first, host second: both answers can be wrong at once, and the phone's own state is the
+  // one the caller can act on without admin rights. Probing the host first would publish only the
+  // Mac's reason and hide the device's (#2683).
+  // Only a disabled Developer Mode toggle stops the run here; whatever else the device reports rides
+  // along onto the build below, because iOS 17+ mounts the developer disk image on demand during
+  // build and launch and refusing that state up front would refuse a state this build clears (#2683).
+  const deviceStates = await measureRunnerStartupStep(
+    startupTimings,
+    'verify_device_readiness',
+    async () =>
+      await (
+        await import('./runner-device-readiness.ts')
+      ).preflightIosRunnerDeviceReadiness(device, {
+        budgetMs: Math.min(
+          RUNNER_DEVICE_READINESS_BUDGET_MS,
+          startupBudget.deadline?.remainingMs() ?? RUNNER_DEVICE_READINESS_BUDGET_MS,
+        ),
+        signal,
+      }),
+  );
   await measureRunnerStartupStep(startupTimings, 'verify_host_dev_tools_security', async () => {
-    // Loaded here rather than at the top of the file: the runner subtree sits in the eager import
-    // closure of the seven Apple facades (eager-closure-budgets), and a preflight only a physical
-    // device ever needs has no business being evaluated to answer a simulator request.
+    // Loaded here for the same reason as the device probe above.
     const { assertDevToolsSecurityForIosRunner } = await import('./runner-dev-tools-security.ts');
     await assertDevToolsSecurityForIosRunner(device);
   });
@@ -206,39 +232,50 @@ async function startRunnerSessionWithLease(
   }
   // Read before the build, which is a phase of its own with its own budget (#2422).
   const startupTimeoutMs = requireRunnerPhaseRemainingMs(startupBudget, 'runner_session_startup');
-  const xctestrunArtifact = await measureRunnerStartupStep(
-    startupTimings,
-    'ensure_xctestrun',
-    async () =>
-      await ensureXctestrunArtifact(device, {
-        ...options,
-        budget: createRunnerPhaseBudget(options.buildTimeoutMs, signal),
-      }),
-  );
-  startupTimings.build_xctestrun = xctestrunArtifact.buildMs;
-  const port = await measureRunnerStartupStep(
-    startupTimings,
-    'allocate_port',
-    async () => await getFreePort(),
-  );
-  const { xctestrunPath, jsonPath } = await measureRunnerStartupStep(
-    startupTimings,
-    'prepare_xctestrun_env',
-    async () =>
-      await prepareXctestrunWithEnv(
-        xctestrunArtifact.xctestrunPath,
-        { AGENT_DEVICE_RUNNER_PORT: String(port) },
-        `session-${device.id}-${runnerOwnerToken()}-${port}`,
-        { iosXctestEnvDir: options.iosXctestEnvDir },
-      ),
-  );
-  const simulatorSetRedirect = await measureRunnerStartupStep(
-    startupTimings,
-    'simulator_set_redirect',
-    async () => await acquireXcodebuildSimulatorSetRedirect(device),
-  );
+  let xctestrunArtifact: Awaited<ReturnType<typeof ensureXctestrunArtifact>>;
+  let port: number;
+  let xctestrunPath: string;
+  let jsonPath: string;
+  let simulatorSetRedirect:
+    | Awaited<ReturnType<typeof acquireXcodebuildSimulatorSetRedirect>>
+    | undefined;
   let runnerProcess: LaunchedRunnerProcess;
+  // One catch for everything between here and a runner that answers, because the device's own answer
+  // belongs on all of it (#2690 review): a cold build, a warm derived cache that fails at install, and
+  // an external xctestrun that never launches are different steps, and a caller told "developer disk
+  // image" should not have to know which one this run happened to take.
   try {
+    xctestrunArtifact = await measureRunnerStartupStep(
+      startupTimings,
+      'ensure_xctestrun',
+      async () =>
+        await ensureXctestrunArtifact(device, {
+          ...options,
+          budget: createRunnerPhaseBudget(options.buildTimeoutMs, signal),
+        }),
+    );
+    startupTimings.build_xctestrun = xctestrunArtifact.buildMs;
+    port = await measureRunnerStartupStep(
+      startupTimings,
+      'allocate_port',
+      async () => await getFreePort(),
+    );
+    ({ xctestrunPath, jsonPath } = await measureRunnerStartupStep(
+      startupTimings,
+      'prepare_xctestrun_env',
+      async () =>
+        await prepareXctestrunWithEnv(
+          xctestrunArtifact.xctestrunPath,
+          { AGENT_DEVICE_RUNNER_PORT: String(port) },
+          `session-${device.id}-${runnerOwnerToken()}-${port}`,
+          { iosXctestEnvDir: options.iosXctestEnvDir },
+        ),
+    ));
+    simulatorSetRedirect = await measureRunnerStartupStep(
+      startupTimings,
+      'simulator_set_redirect',
+      async () => await acquireXcodebuildSimulatorSetRedirect(device),
+    );
     if (xctestrunArtifact.buildMs > 0) {
       emitRequestProgress({
         type: 'command',
@@ -260,7 +297,7 @@ async function startRunnerSessionWithLease(
     );
   } catch (error) {
     await simulatorSetRedirect?.releaseBestEffort();
-    throw error;
+    throw enrichRunnerStartupFailureWithDeviceStates(error, deviceStates);
   }
   const sessionId = buildRunnerSessionId(device.id, port);
   const lease = buildRunnerLease({
@@ -285,6 +322,7 @@ async function startRunnerSessionWithLease(
     startupRetryWake: runnerProcess.startupRetryWake,
     startupTimeoutMs: normalizeRunnerStartupTimeoutMs(startupTimeoutMs),
     startupTimings,
+    startupDeviceStates: deviceStates,
     logicalLeaseContext,
     simulatorSetRedirect: simulatorSetRedirect ?? undefined,
     lease,
@@ -748,6 +786,9 @@ export async function executeRunnerCommandWithSession(
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   emitRunnerStartupTimings(session, command.command);
+  // Drawn before anything is sent, including the preflight: whatever the runner writes from here on
+  // is this command's attempt, and whatever is already in the log belongs to an earlier one (#2683).
+  const logAttempt = await captureRunnerLogAttempt(logPath, { timeoutMs, signal });
   const runnerCommand = withRunnerCommandId(command);
   const readOnlyCommand = isReadOnlyRunnerCommand(runnerCommand);
   const deadline = Deadline.fromTimeoutMs(timeoutMs);
@@ -757,7 +798,7 @@ export async function executeRunnerCommandWithSession(
       device,
       session,
       runnerCommand,
-      logPath,
+      logAttempt,
       deadline,
       signal,
       decision: preflightDecision,
@@ -787,7 +828,7 @@ export async function executeRunnerCommandWithSession(
     throw markSkippedPreflightTransportError(error, session, preflightDecision);
   }
   try {
-    const data = await parseRunnerResponse(response, session, logPath);
+    const data = await parseRunnerResponse(response, session, logAttempt);
     // Mirror the runner's own main-thread occupancy stamped on this response: a runner that
     // served a read off the XCTest channel (e.g. a private-AX capture) while a tree crawl it
     // abandoned still grinds reports busy, so the healthy response must not be read as drained.
@@ -910,12 +951,13 @@ async function runRunnerReadinessPreflight(params: {
   device: DeviceInfo;
   session: RunnerSession;
   runnerCommand: RunnerCommand;
-  logPath: string | undefined;
+  logAttempt: RunnerLogAttempt | undefined;
   deadline: Deadline;
   signal: AbortSignal | undefined;
   decision: Extract<RunnerReadinessPreflightDecision, { action: 'run' }>;
 }): Promise<void> {
-  const { device, session, runnerCommand, logPath, deadline, signal, decision } = params;
+  const { device, session, runnerCommand, logAttempt, deadline, signal, decision } = params;
+  const logPath = logAttempt?.logPath;
   const readinessTimeoutMs =
     session.state === 'ready'
       ? Math.min(RUNNER_READY_PREFLIGHT_TIMEOUT_MS, deadline.remainingMs())
@@ -942,7 +984,7 @@ async function runRunnerReadinessPreflight(params: {
         timeoutMs: readinessTimeoutMs,
       },
     );
-    await parseRunnerResponse(readinessResponse, session, logPath);
+    await parseRunnerResponse(readinessResponse, session, logAttempt);
   } catch (error) {
     throw markRunnerReadinessPreflightError(error);
   }
@@ -978,13 +1020,14 @@ function emitRunnerReadinessPreflightSkipped(
 export async function parseRunnerResponse(
   response: Response,
   session: Pick<RunnerSession, 'state'>,
-  logPath?: string,
+  /** The command's own log boundary. Absent means no log was configured, so nothing is read. */
+  logAttempt?: RunnerLogAttempt,
 ): Promise<Record<string, unknown>> {
   const payload = decodeRunnerResponseBody(await response.text());
   if (!isRunnerResponseOk(payload)) {
     throw await enrichRunnerFailureFromLog({
-      error: buildRunnerResponseError(payload, logPath),
-      logPath,
+      error: buildRunnerResponseError(payload, logAttempt?.logPath),
+      logSince: logAttempt,
     });
   }
   advanceRunnerSessionState(session, 'ready');

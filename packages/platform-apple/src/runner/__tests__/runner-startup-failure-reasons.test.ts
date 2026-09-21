@@ -4,10 +4,16 @@ import path from 'node:path';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 import { AppError, normalizeError, type NormalizedError } from '@agent-device/kernel/errors';
 import { resetAllProcessMemosForTests } from '@agent-device/kernel/ttl-memo';
+import {
+  IOS_DEVICE_DEVELOPER_DISK_IMAGE_HINT,
+  IOS_DEVICE_DEVELOPER_MODE_OFF_HINT,
+} from '../../core/devicectl.ts';
 import { appleRunnerTestHost } from '../test-host.ts';
 import type { ExecResult } from '@agent-device/host-kit/command';
 import { createRunnerPhaseBudget, ensureXctestrunArtifact } from '../runner-xctestrun.ts';
 import {
+  enrichRunnerStartupFailureWithDeviceStates,
+  RUNNER_DEVICE_READINESS_FAILURE_REASONS,
   RUNNER_ERROR_RULES,
   classifyRunnerStartupFailure,
   RUNNER_STARTUP_FAILURE_REASONS,
@@ -42,13 +48,23 @@ import { mkdtempForTestSync } from './tmp-dir.ts';
 
 const CACHE_RECOVERY_HINT = /clean:xcuitest|apple-runner\/derived/;
 
-const HINT_FOR_REASON: Record<RunnerStartupFailureReason, RegExp> = {
-  bundle_identifier_already_registered: /AGENT_DEVICE_IOS_BUNDLE_ID/,
-  signing_no_development_team: /AGENT_DEVICE_IOS_TEAM_ID/,
-  signing_provisioning_profile_missing: /AGENT_DEVICE_IOS_PROVISIONING_PROFILE/,
-  signing_unspecified: /Automatic Signing/,
-  devtools_security_developer_mode_disabled: /DevToolsSecurity -enable/,
-  build_failed_unclassified: CACHE_RECOVERY_HINT,
+/**
+ * The phrase each reason's advice has to contain. Kept as text rather than as syntax because two of
+ * them are quotations from `core/devicectl.ts`, and a fifth escaping helper for a prose remedy with
+ * parentheses in it is not this suite's job.
+ */
+const HINT_FOR_REASON: Record<RunnerStartupFailureReason, string> = {
+  bundle_identifier_already_registered: 'AGENT_DEVICE_IOS_BUNDLE_ID',
+  signing_no_development_team: 'AGENT_DEVICE_IOS_TEAM_ID',
+  signing_provisioning_profile_missing: 'AGENT_DEVICE_IOS_PROVISIONING_PROFILE',
+  signing_unspecified: 'Automatic Signing',
+  devtools_security_developer_mode_disabled: 'DevToolsSecurity -enable',
+  // Both device remedies are owned by `core/devicectl.ts` and travel on the device report, so this
+  // table quotes them instead of restating them; `runner-device-readiness.test.ts` is where the
+  // preflight publishing them is asserted.
+  device_developer_mode_disabled: IOS_DEVICE_DEVELOPER_MODE_OFF_HINT,
+  device_developer_disk_image_unavailable: IOS_DEVICE_DEVELOPER_DISK_IMAGE_HINT,
+  build_failed_unclassified: 'clean:xcuitest',
 };
 
 const runCmdSync = vi.fn();
@@ -92,9 +108,57 @@ afterEach(() => {
 
 for (const fixture of buildForTestingFixtures()) {
   test(`a build-for-testing failure publishes ${fixture.reason} for ${fixture.id}`, async () => {
-    assertFailureEnvelope(await driveBuildFailure(fixture), fixture);
+    const envelope = await driveBuildFailure(fixture);
+
+    assertFailureEnvelope(envelope, fixture);
+    // The device's answer travels on the failure it explains, and on nothing else: a fixture with no
+    // recorded device report must not grow one (#2683).
+    assert.equal(envelope.details?.developerDiskImage, fixture.deviceReport?.developerDiskImage);
   });
 }
+
+/** The states of a phone whose developer disk image is down, as `preflightIosRunnerDeviceReadiness` reads them. */
+const DEVICE_WITH_IMAGE_DOWN = {
+  developerMode: 'enabled',
+  developerDiskImage: 'unavailable',
+  developerDiskImageHint: IOS_DEVICE_DEVELOPER_DISK_IMAGE_HINT,
+} as const;
+
+test('a command the host killed names no device cause even without the threaded fact', () => {
+  // The install and launch steps fail with the exec's own timeout error, which no build catch has
+  // wrapped, so the deadline has to be read off the error itself (#2690 review).
+  const killed = new AppError('COMMAND_FAILED', 'xcodebuild timed out after 900000ms', {
+    cmd: 'xcodebuild',
+    timeoutMs: 900_000,
+  });
+
+  const enriched = enrichRunnerStartupFailureWithDeviceStates(
+    killed,
+    DEVICE_WITH_IMAGE_DOWN,
+  ) as AppError;
+
+  assert.equal(enriched.details?.reason, undefined);
+  assert.equal(enriched.details?.hint, undefined);
+  assert.equal(enriched.details?.developerDiskImage, 'unavailable');
+});
+
+test('the device speaking for a failure keeps the error that caused it', () => {
+  const caused = new AppError(
+    'COMMAND_FAILED',
+    'xcodebuild build-for-testing failed',
+    { reason: RUNNER_STARTUP_FAILURE_UNCLASSIFIED_REASON },
+    new Error('xcodebuild was killed by the host'),
+  );
+
+  const enriched = enrichRunnerStartupFailureWithDeviceStates(
+    caused,
+    DEVICE_WITH_IMAGE_DOWN,
+  ) as AppError;
+
+  assert.equal(enriched.details?.reason, 'device_developer_disk_image_unavailable');
+  // The cause is what a reader of the daemon log follows to the command that actually died.
+  assert.equal(enriched.cause, caused.cause);
+});
 
 /**
  * Every startup failure reaches a caller through one envelope: the typed reason in `details`, its hint
@@ -109,7 +173,10 @@ function assertFailureEnvelope(
   assert.equal(envelope.code, 'COMMAND_FAILED');
   assert.equal(envelope.message, 'xcodebuild build-for-testing failed');
   assert.equal(envelope.details?.reason, fixture.reason);
-  assert.match(String(envelope.hint), HINT_FOR_REASON[fixture.reason]);
+  assert.ok(
+    String(envelope.hint).includes(HINT_FOR_REASON[fixture.reason]),
+    `the ${fixture.reason} hint must carry "${HINT_FOR_REASON[fixture.reason]}"`,
+  );
   // No `logPath` was handed to `normalizeError`: the top-level value can only be the one the
   // build catch wrote into the error it throws.
   assert.equal(envelope.logPath, logPath);
@@ -118,6 +185,10 @@ function assertFailureEnvelope(
   assert.equal(envelope.details?.hint, undefined);
   assert.equal(envelope.details?.logPath, undefined);
   assert.equal(envelope.details?.diagnosticId, undefined);
+  // Plumbing one catch leaves for the next, never for a caller: `reason` and `hint` already carry the
+  // verdict these facts produced (#2690 review).
+  assert.equal(envelope.details?.startupRuleMatched, undefined);
+  assert.equal(envelope.details?.startupHostDeadlineHit, undefined);
   assertToolOutputReachable(envelope, fixture);
 }
 
@@ -131,7 +202,7 @@ function assertToolOutputReachable(
   envelope: NormalizedError,
   fixture: RunnerStartupFailureFixture,
 ): void {
-  if ((fixture.carrier ?? 'exec-details') !== 'exec-details') {
+  if ((fixture.carrier ?? 'exec-details') === 'message-only') {
     assert.equal(envelope.details?.details, undefined);
     return;
   }
@@ -156,6 +227,10 @@ test('every reason the classifier can name is produced by a rule row', () => {
   for (const reason of RUNNER_STARTUP_FAILURE_REASONS) {
     // The catch-all is the classifier's own answer when no row matched, so it names no row.
     if (reason === RUNNER_STARTUP_FAILURE_UNCLASSIFIED_REASON) continue;
+    // The device-readiness members are named by the device's own states in
+    // `runner-device-readiness.ts`, not by a rule row: no amount of tool text establishes them,
+    // which is exactly why they are declared as a subset (#2683).
+    if ((RUNNER_DEVICE_READINESS_FAILURE_REASONS as readonly string[]).includes(reason)) continue;
     assert.ok(reasonsFromRules.has(reason), `no rule row yields the ${reason} reason`);
   }
 });
@@ -240,9 +315,27 @@ test('a conflicting-settings failure is not answered with missing-profile advice
   assert.doesNotMatch(String(envelope.hint), /AGENT_DEVICE_IOS_PROVISIONING_PROFILE/);
 });
 
-/** Drives a recorded fixture through the real build catch and normalizes what it threw. */
+/**
+ * Drives a recorded fixture through the two steps a real startup runs in order: the build catch turns
+ * the tool's output into a typed reason, and the session's startup catch hands that failure to the
+ * device enrichment step (#2690 review). Both are the production functions; nothing here re-implements
+ * either.
+ */
 async function driveBuildFailure(fixture: RunnerStartupFailureFixture): Promise<NormalizedError> {
-  return normalizeThrown(await runBuildCatch(() => buildForTestingExecFailure(fixture)));
+  const thrown = await runBuildCatch(() => buildForTestingExecFailure(fixture));
+  return normalizeThrown(
+    enrichRunnerStartupFailureWithDeviceStates(thrown, deviceStatesOf(fixture)),
+  );
+}
+
+/** The states `preflightIosRunnerDeviceReadiness` would have handed the startup for this fixture. */
+function deviceStatesOf(fixture: RunnerStartupFailureFixture | undefined) {
+  if (!fixture?.deviceReport) return undefined;
+  return {
+    developerMode: fixture.deviceReport.developerMode,
+    developerDiskImage: fixture.deviceReport.developerDiskImage,
+    developerDiskImageHint: IOS_DEVICE_DEVELOPER_DISK_IMAGE_HINT,
+  };
 }
 
 /** Drives a hand-built rejection through the same real build catch. */

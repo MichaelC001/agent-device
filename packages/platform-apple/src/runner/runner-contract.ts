@@ -14,10 +14,12 @@ import type { ClickButton } from '@agent-device/contracts/click-button';
 import type { ElementSelectorKey } from '@agent-device/contracts/interactor-types';
 import type { GesturePlan } from '@agent-device/contracts/gesture-plan-types';
 import type { ScrollDirection } from '@agent-device/contracts/scroll-gesture';
+import type { IosDeveloperDiskImageState, IosDeveloperModeState } from './host.ts';
 import type { ScrollReleaseBehavior } from '@agent-device/contracts/scroll-command';
 import {
   getRequestSignal,
   isRequestCanceled,
+  isCommandTimeoutError,
   bootFailureHint,
   classifyBootFailure,
 } from './host.ts';
@@ -225,6 +227,24 @@ type RunnerErrorVerdicts = {
 };
 
 /**
+ * The two device-readiness members (#2683): what the iPhone itself reports through
+ * `devicectl device info details`, not what another tool's output implies about it. They are listed
+ * apart because they are the members {@link classifyRunnerStartupFailure} does NOT produce — no
+ * xcodebuild or host-tool text establishes them, and the code that reads the device publishes them
+ * with the hint beside it. The two reach the caller at different moments, which is the whole
+ * asymmetry of #2683: a disabled Developer Mode toggle refuses the run up front, while an unavailable
+ * developer disk image is published onto a build that named no cause of its own, because iOS 17+
+ * mounts that image on demand during build and launch. A connect-stage failure always claims a cause
+ * of its own (`IOS_RUNNER_CONNECT_TIMEOUT` unless a provisioning row matches first), so there the
+ * image state travels only as `details.developerDiskImage`, and
+ * `device_developer_disk_image_unavailable` is published only from the startup build catch.
+ */
+export const RUNNER_DEVICE_READINESS_FAILURE_REASONS = [
+  'device_developer_mode_disabled',
+  'device_developer_disk_image_unavailable',
+] as const;
+
+/**
  * Why the Apple runner could not reach the point of serving a command (#2680). Published in
  * `details.reason` on the `COMMAND_FAILED` every one of these paths throws, so a caller branches
  * on the reason instead of matching prose; the hint that answers it travels with it in
@@ -247,10 +267,15 @@ export const RUNNER_STARTUP_FAILURE_REASONS = [
   'signing_provisioning_profile_missing',
   'signing_unspecified',
   'devtools_security_developer_mode_disabled',
+  ...RUNNER_DEVICE_READINESS_FAILURE_REASONS,
   'build_failed_unclassified',
 ] as const;
 
 export type RunnerStartupFailureReason = (typeof RUNNER_STARTUP_FAILURE_REASONS)[number];
+
+/** The device-readiness subset, typed from the one list above. */
+export type RunnerDeviceReadinessFailureReason =
+  (typeof RUNNER_DEVICE_READINESS_FAILURE_REASONS)[number];
 
 /**
  * The reason a startup failure carries when no rule proves a cause. Its hint is deliberately the
@@ -788,10 +813,11 @@ export function buildRunnerConnectError(params: {
   endpoints: string[];
   logPath?: string;
   lastError: unknown;
+  deviceStates?: IosRunnerDeviceStates;
 }): AppError {
-  const { port, endpoints, logPath, lastError } = params;
+  const { port, endpoints, logPath, lastError, deviceStates } = params;
   const message = 'Runner did not accept connection';
-  return new AppError('COMMAND_FAILED', message, {
+  const error = new AppError('COMMAND_FAILED', message, {
     port,
     endpoints,
     logPath,
@@ -803,6 +829,9 @@ export function buildRunnerConnectError(params: {
     }),
     hint: bootFailureHint('IOS_RUNNER_CONNECT_TIMEOUT'),
   });
+  // The other way the connect stage gives up: `xcodebuild` is still alive at the deadline. It gets
+  // the same enrichment as the early exit below (#2683).
+  return enrichRunnerStartupFailureWithDeviceStates(error, deviceStates) as AppError;
 }
 
 export async function buildRunnerEarlyExitError(params: {
@@ -822,7 +851,7 @@ export async function buildRunnerEarlyExitError(params: {
   // exec-guard-allow: xcodebuild can exit 0 and still count as an early exit;
   // the trio is nested tool context under `xcodebuild`, classified into
   // `reason`/`hint` above — not a process-exit wrap.
-  return new AppError('COMMAND_FAILED', message, {
+  const error = new AppError('COMMAND_FAILED', message, {
     port,
     logPath,
     xcodebuild: {
@@ -833,6 +862,11 @@ export async function buildRunnerEarlyExitError(params: {
     reason,
     hint: resolveRunnerEarlyExitHint(message, result.stdout, result.stderr, reason),
   });
+  // The build catch is not the only way a runner stops before serving a command. A locked phone lets
+  // the build finish and kills `xcodebuild test-without-building` instead, so nothing reaches that
+  // catch and the disk-image state read before the build would be dropped. Same enrichment, applied
+  // to the failure this path actually produces (#2683).
+  return enrichRunnerStartupFailureWithDeviceStates(error, session.startupDeviceStates) as AppError;
 }
 
 /**
@@ -844,23 +878,135 @@ export async function buildRunnerEarlyExitError(params: {
  * Callers publish the pair as `details.reason` plus the top-level hint on a `COMMAND_FAILED`; the
  * code is `COMMAND_FAILED` for every reason, so the reason is the assertion.
  */
-export function classifyRunnerStartupFailure(error: unknown): {
-  reason: RunnerStartupFailureReason;
-  hint: string;
-} {
+export function classifyRunnerStartupFailure(error: unknown): RunnerStartupClassification {
   if (error instanceof AppError) {
     for (const rule of RUNNER_ERROR_RULES) {
       const buildFailure = rule.buildFailure;
       if (!buildFailure) continue;
       if (matchesRunnerErrorRule(error, rule.match)) {
-        return { reason: buildFailure.reason, hint: buildFailure.hint };
+        return { reason: buildFailure.reason, hint: buildFailure.hint, matched: true };
       }
     }
   }
   return {
     reason: RUNNER_STARTUP_FAILURE_UNCLASSIFIED_REASON,
     hint: RUNNER_CACHE_RECOVERY_HINT,
+    matched: false,
   };
+}
+
+/**
+ * The verdict, the advice beside it, and whether a row reached either (#2690 review). `matched` is
+ * half the answer rather than an implementation detail: {@link RUNNER_STARTUP_FAILURE_UNCLASSIFIED_REASON}
+ * is also what a row that deliberately claims no cause publishes, so reading the reason alone cannot
+ * tell "nothing spoke" from "a row spoke and declined to name a cause".
+ */
+export type RunnerStartupClassification = Readonly<{
+  reason: RunnerStartupFailureReason;
+  hint: string;
+  /**
+   * False only when no rule row matched at all. The catch that publishes this verdict carries it on
+   * `details.startupRuleMatched`, which is the half a caller cannot recover from the reason alone.
+   */
+  matched: boolean;
+}>;
+
+/**
+ * What the startup carries forward from the device so a later failure can say what the phone said
+ * (#2683). The one thing that stops a run up front is a disabled Developer Mode toggle, which no
+ * later step can change; everything else the device reports is only worth publishing beside the
+ * failure it explains.
+ */
+export type IosRunnerDeviceStates = Readonly<{
+  developerMode: IosDeveloperModeState;
+  developerDiskImage: IosDeveloperDiskImageState;
+  /** The remedy for an unavailable image, worded by `core/devicectl.ts` and read, not rewritten. */
+  developerDiskImageHint: string;
+}>;
+
+/**
+ * The device's turn on a startup failure (#2683, #2690 review), applied by the session's startup
+ * catch so it reaches every path that stops a runner before it serves a command: a cold build, a warm
+ * derived cache that fails at install, or an external xctestrun that never launches. The phone's own
+ * state rides along as `details.developerDiskImage` on all of them, because it is a fact whoever is
+ * reading this failure wants.
+ *
+ * It becomes the *reason* only when the failure carries no reason of its own and no rule row matched.
+ * `devicectl` reports the image only while the tunnel is up and the phone is booted, so an
+ * unavailable reading that reached here is a fact about the device rather than a snapshot of a sleeping
+ * phone — but a failure that already named a cause, or that a row looked at and declined to name one
+ * for, outranks a state that may have been cleared before the failure was written down. And a command
+ * the host killed at its own deadline says nothing about the device either: the build that never
+ * finished cannot have been refused for want of developer support, so a timeout outranks a state too.
+ * An error that is not an `AppError` comes back untouched: a cancellation and a foreign failure keep
+ * their identity.
+ */
+export function enrichRunnerStartupFailureWithDeviceStates(
+  error: unknown,
+  states: IosRunnerDeviceStates | undefined,
+): unknown {
+  if (!states || !(error instanceof AppError)) return error;
+  const speaks =
+    claimedStartupFailureReason(error) === undefined &&
+    states.developerDiskImage === 'unavailable' &&
+    !startupFailureRuleMatched(error) &&
+    !startupFailureHostDeadlineHit(error);
+  return new AppError(
+    error.code,
+    error.message,
+    {
+      ...(error.details ?? {}),
+      ...(speaks
+        ? {
+            reason: 'device_developer_disk_image_unavailable',
+            hint: states.developerDiskImageHint,
+          }
+        : {}),
+      developerDiskImage: states.developerDiskImage,
+    },
+    error.cause,
+  );
+}
+
+/**
+ * The reason a startup failure already carries, discounting the placeholder the classifier publishes
+ * when nothing proved a cause. Without this discount the build catch's own
+ * `build_failed_unclassified` would read as a claimed cause and silence the device everywhere.
+ */
+function claimedStartupFailureReason(error: AppError): RunnerStartupFailureReason | undefined {
+  const reason = error.details?.reason;
+  if (typeof reason !== 'string' || reason === RUNNER_STARTUP_FAILURE_UNCLASSIFIED_REASON) {
+    return undefined;
+  }
+  return reason as RunnerStartupFailureReason;
+}
+
+/**
+ * Whether the host's own execution deadline ended the command behind this failure. A build the host
+ * killed at `buildTimeoutMs` reaches the startup catch as `build_failed_unclassified` with nothing
+ * matched, and an unavailable image sitting on the device would then be named as the cause of a build
+ * that was simply too slow (#2690 review). A catch that published a classification carries the answer
+ * in `details.startupHostDeadlineHit` for the same reason it carries `startupRuleMatched`: its wrapper
+ * buries the tool error a level too deep to inspect. A failure that never passed through such a catch
+ * is read here, where the exec's own `timeoutMs` detail is still in reach.
+ */
+function startupFailureHostDeadlineHit(error: AppError): boolean {
+  const published = error.details?.startupHostDeadlineHit;
+  if (typeof published === 'boolean') return published;
+  return isCommandTimeoutError(error);
+}
+
+/**
+ * Whether a rule row already reached this failure. A catch that published a classification carries its
+ * own answer in `details.startupRuleMatched`, because its wrapper keeps the tool's text one level too
+ * deep for the rows to read again — re-classifying the wrapper would report "nothing matched" for a
+ * failure whose cause a row had just declined to name (#2690 review). A failure that never passed
+ * through such a catch is classified here, which is the same answer its own publisher would have given.
+ */
+function startupFailureRuleMatched(error: AppError): boolean {
+  const published = error.details?.startupRuleMatched;
+  if (typeof published === 'boolean') return published;
+  return classifyRunnerStartupFailure(error).matched;
 }
 
 export function withRunnerCommandId(command: RunnerCommand): RunnerCommand {
