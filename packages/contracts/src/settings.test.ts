@@ -1,18 +1,27 @@
 import { describe, expect, expectTypeOf, test } from 'vitest';
+import { READABLE_SETTINGS } from './platform-runtime-operations.ts';
 import {
+  describeSettingRead,
+  describeSettingWrite,
   getUnsupportedMacOsSettingMessage,
   isMacOsSettingSupported,
   MACOS_PERMISSION_TARGETS,
   MOBILE_PERMISSION_TARGETS,
   parsePermissionAction,
   parsePermissionTarget,
+  parseTextSizeCategory,
   PERMISSION_ACTIONS,
   PERMISSION_MODES,
+  readTextSizeCategory,
   SETTINGS_INVALID_ARGS_MESSAGE,
   SETTINGS_MACOS_PERMISSION_USAGE,
   SETTINGS_USAGE_OVERRIDE,
+  TEXT_SIZE_CATEGORIES,
+  textSizeSettingPayload,
   type PermissionAction,
   type PermissionTarget,
+  type ReadableSetting,
+  type TextSizeCategory,
 } from './settings.ts';
 
 // Fixed expected data on purpose (#2614): this file is the witness that a shared permission
@@ -39,11 +48,29 @@ const MOBILE_TARGETS = [
 
 const MACOS_ONLY_TARGETS = ['accessibility', 'screen-recording', 'input-monitoring'] as const;
 
+// Fixed expected data on purpose: the ladder the `settings text-size` surface publishes, in the
+// order help lists it. A rung added, dropped, or reordered fails the usage pins below.
+const TEXT_SIZE_LADDER = [
+  'extra-small',
+  'small',
+  'medium',
+  'large',
+  'extra-large',
+  'extra-extra-large',
+  'extra-extra-extra-large',
+  'accessibility-medium',
+  'accessibility-large',
+  'accessibility-extra-large',
+  'accessibility-extra-extra-large',
+  'accessibility-extra-extra-extra-large',
+] as const;
+
 const SETTINGS_FORMS = [
   '<wifi|airplane|location> <on|off>',
   'location set <lat> <lon>',
   'animations <on|off>',
   'appearance <light|dark|toggle>',
+  `text-size [${TEXT_SIZE_LADDER.join('|')}]`,
   'faceid <match|nonmatch|enroll|unenroll>',
   'touchid <match|nonmatch|enroll|unenroll>',
   'fingerprint <match|nonmatch>',
@@ -113,7 +140,7 @@ describe('settings usage and error strings', () => {
     expect(getUnsupportedMacOsSettingMessage('wifi')).toBe(
       'Unsupported macOS setting: wifi. macOS supports only settings appearance <light|dark|toggle> ' +
         'and settings permission <grant|reset> <accessibility|screen-recording|input-monitoring>. ' +
-        'wifi|airplane|location|animations remain unsupported on macOS.',
+        'wifi|airplane|location|animations|text-size remain unsupported on macOS.',
     );
   });
 
@@ -121,7 +148,70 @@ describe('settings usage and error strings', () => {
     expect(isMacOsSettingSupported(' Permission ')).toBe(true);
     expect(isMacOsSettingSupported('appearance')).toBe(true);
     expect(isMacOsSettingSupported('wifi')).toBe(false);
+    expect(isMacOsSettingSupported('text-size')).toBe(false);
   });
+});
+
+describe('text-size vocabulary', () => {
+  test('the ladder holds the rungs iOS exposes, in size order', () => {
+    expect([...TEXT_SIZE_CATEGORIES]).toEqual([...TEXT_SIZE_LADDER]);
+    expectTypeOf<TextSizeCategory>().toEqualTypeOf<(typeof TEXT_SIZE_LADDER)[number]>();
+  });
+
+  test('every rung parses under each normalization', () => {
+    for (const category of TEXT_SIZE_LADDER) {
+      for (const normalize of NORMALIZATIONS) {
+        expect(parseTextSizeCategory(normalize(category))).toBe(category);
+        expect(readTextSizeCategory(normalize(category))).toBe(category);
+      }
+    }
+  });
+
+  test('parseTextSizeCategory refuses an off-ladder value with the whole ladder', () => {
+    // `simctl ui <device> content_size <bogus>` answers "Invalid argument" and exits 0, so refusing
+    // here is the only thing that keeps a mistyped rung from being reported as applied.
+    for (const value of ['gigantic', '', '   ', 'larger', 'extra_large']) {
+      expectInvalidArgs(
+        () => parseTextSizeCategory(value),
+        `Invalid text size: ${value}. Use ${TEXT_SIZE_LADDER.join('|')}.`,
+      );
+    }
+    expect(readTextSizeCategory('gigantic')).toBeUndefined();
+    expect(readTextSizeCategory(undefined)).toBeUndefined();
+  });
+
+  test('the read payload names the setting that answered, beside the platform value', () => {
+    const payload = textSizeSettingPayload('accessibility-large', '1.75');
+    expect(payload).toEqual({
+      setting: 'text-size',
+      category: 'accessibility-large',
+      platformValue: '1.75',
+    });
+    // Owners build the payload through this builder; a frozen result is what stops one from
+    // widening the payload the response is composed from.
+    expect(Object.isFrozen(payload)).toBe(true);
+  });
+
+  test('each leg answers with the sentence its setting owns', () => {
+    // The response text is a claim about the setting, so it is composed here rather than at the call
+    // site that happens to run the request.
+    expect(describeSettingRead(textSizeSettingPayload('large', 'Small'))).toBe(
+      'Text size is large',
+    );
+    expect(describeSettingWrite('text-size', 'large', undefined)).toBe('Text size set to large');
+    expect(describeSettingWrite('clear-app-state', 'clear', 'com.example.app')).toBe(
+      'Cleared user data for com.example.app',
+    );
+    expect(describeSettingWrite('wifi', 'on', undefined)).toBe('Updated setting: wifi');
+  });
+});
+
+test('the readable-setting vocabulary is the names the read leg answers', () => {
+  // The type is the vocabulary; `READABLE_SETTINGS` beside it is the value the CLI hub evaluates.
+  // Both directions are pinned where the value is declared, so this is the one direction that has to
+  // be read: a name that joins the type without joining the value is a compile error there.
+  const readable: readonly ReadableSetting[] = READABLE_SETTINGS;
+  expect(readable).toEqual(['text-size']);
 });
 
 describe('parsePermissionTarget', () => {

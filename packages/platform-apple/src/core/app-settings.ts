@@ -3,6 +3,8 @@ import {
   type MobilePermissionTarget,
   parsePermissionAction,
   parsePermissionTarget,
+  type ReadableSetting,
+  type ReadSettingResult,
   type SettingOptions,
 } from '@agent-device/contracts/settings';
 import { isIosFamily, isMacOs, type DeviceInfo } from '@agent-device/kernel/device';
@@ -20,6 +22,7 @@ import {
 import { setMacOsAppearance } from '../os/macos/apps.ts';
 import { runMacOsPermissionAction, type MacOsPermissionTarget } from '../os/macos/helper.ts';
 import { closeIosApp } from './app-launch.ts';
+import { readIosTextSize, setIosTextSize } from './settings-text-size.ts';
 import { resolveIosApp } from './app-resolution.ts';
 import { runSimctl, simctlArgs } from './apps-simctl.ts';
 import {
@@ -148,6 +151,9 @@ export async function setIosSetting(
       await runSimctl(device, ['ui', device.id, 'appearance', target]);
       return;
     }
+    case 'text-size': {
+      return await setIosTextSize(device, state);
+    }
     case 'permission': {
       if (!appBundleId) {
         throw new AppError('INVALID_ARGS', 'permission setting requires an active app in session');
@@ -160,6 +166,23 @@ export async function setIosSetting(
     default:
       throw new AppError('INVALID_ARGS', `Unsupported setting: ${setting}`);
   }
+}
+
+/**
+ * The Apple read leg, exhaustive over the readable list: a setting joins `READABLE_SETTINGS` only
+ * with an answer here, so a new readable name is a compile error on this map rather than a runtime
+ * refusal hidden in a default case. The leaf that holds the value still refuses on its own fact.
+ */
+const IOS_READABLE_SETTINGS = {
+  'text-size': readIosTextSize,
+} as const satisfies Record<ReadableSetting, (device: DeviceInfo) => Promise<ReadSettingResult>>;
+
+/** Answers `settings <setting>` with the value the Apple leaf holds. */
+export async function readIosSetting(
+  device: DeviceInfo,
+  setting: ReadableSetting,
+): Promise<ReadSettingResult> {
+  return await IOS_READABLE_SETTINGS[setting](device);
 }
 
 async function clearIosSimulatorAppState(

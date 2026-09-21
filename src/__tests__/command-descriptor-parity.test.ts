@@ -305,6 +305,20 @@ test('recordingEffect resolves request-sensitive observation and mutation subcom
     }),
     'mutates-app',
   );
+  // settings: the read leg observes, and the same word with a category mutates. Both legs come from
+  // the one vocabulary rule, so this is where the two halves of `text-size` are pinned apart.
+  assert.equal(
+    resolveCommandRecordingEffect({ command: 'settings', positionals: ['text-size'], flags: {} }),
+    'observes-app',
+  );
+  assert.equal(
+    resolveCommandRecordingEffect({
+      command: 'settings',
+      positionals: ['text-size', 'large'],
+      flags: {},
+    }),
+    'mutates-app',
+  );
 });
 
 test('frameworkTier is declared iff a command is public, and never elsewhere', () => {
