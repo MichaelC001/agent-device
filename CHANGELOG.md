@@ -19,6 +19,12 @@
   none, and Android, HarmonyOS, Vega, Linux, web, tvOS, macOS, and visionOS each state their own refusal.
   Simulators run no Shortcuts or App Intents, so what a press triggers is verifiable only on a physical
   iPhone (#2699).
+- Changed (all): `home`, `app-switcher` and `action-button` are one system-button family in the
+  runtime contract. An owner without a button now refuses it with the family's hint (for example
+  `Android has no key event for this system button.`) rather than a per-button sentence, and a
+  Limrun or WebDriver session that is no longer active refuses `action-button` with that session's
+  own reason like every other cell; the command name still leads the `UNSUPPORTED_OPERATION`
+  message.
 - Fixed (android): `clipboard read` and `clipboard write` stop reporting success on a build whose
   clipboard service has no shell command. Android 16 (API 36) answers every `adb shell cmd clipboard …`
   with the framework default `Binder.handleShellCommand` — `No shell command implementation.` on
