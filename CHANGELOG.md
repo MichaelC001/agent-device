@@ -32,6 +32,20 @@
   answers pixels instead of PNG bytes. The `--out` diff image stays PNG, as do the crop, overlay, and
   resize passes that rewrite a screenshot in place and could not survive a lossy container.
 
+- Added (maestro): `setPermissions` and `launchApp.permissions` support `all: allow|deny|unset`
+  on iOS simulators and Android, with specific entries overriding `all`. Both accept a
+  Maestro-style permissions map. Entries apply in order until the selected platform refuses one,
+  and the error then names what landed. Android's only allow level is while-in-use, so
+  `location: inuse|never` apply `allow`/`deny` there; `location: always` and `photos: limited`
+  stay Apple-only.
+- Fixed (ios): `settings permission` no longer refuses a privacy service that `simctl privacy`
+  accepts but omits from its own help text — Xcode 26 does that for `camera`, so
+  `settings permission grant camera` and a Maestro `camera: allow` failed as unsupported while
+  the raw command worked. Support is now `simctl privacy`'s own verdict per runtime, and a
+  service it refuses fails with `UNSUPPORTED_OPERATION`. This also drops the cached
+  `simctl privacy help` probe and the `privacy help` spawn before the first permission change.
+  iOS `all` still does not cover notifications: current runtimes have no notifications service,
+  so a targeted notifications change fails loudly and `all` leaves it unchanged.
 - Added (limrun): `record start` and `record stop` on Limrun iOS and Android direct sessions. The
   runtime declared recording unavailable although the Limrun SDK exposes a server-side recorder.
   Start asks the instance to record (`--quality medium` maps to Limrun quality 5, `high` to 8);
