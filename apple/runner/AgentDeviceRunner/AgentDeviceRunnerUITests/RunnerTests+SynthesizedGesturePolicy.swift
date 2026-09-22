@@ -59,6 +59,9 @@ struct SynthesizedGesturePolicy: Equatable, Hashable {
 
 struct SynthesizedCoordinateContext {
   let referenceFrame: CGRect
+  /// The window `referenceFrame` was measured on. Synthesized records route their display ID
+  /// through this same window so geometry and routing can never name different windows.
+  let resolvedWindow: XCUIElement
   let keyboardPolicy: SynthesizedKeyboardPolicy
   let fallbackPolicy: SynthesizedFallbackPolicy
   let accessibilityHealth: RunnerAccessibilityHealth
@@ -66,6 +69,7 @@ struct SynthesizedCoordinateContext {
   func withReferenceFrame(_ frame: CGRect) -> SynthesizedCoordinateContext {
     SynthesizedCoordinateContext(
       referenceFrame: frame,
+      resolvedWindow: resolvedWindow,
       keyboardPolicy: keyboardPolicy,
       fallbackPolicy: fallbackPolicy,
       accessibilityHealth: accessibilityHealth
@@ -144,7 +148,7 @@ extension RunnerTests {
       return
     }
     NSLog(
-      "AGENT_DEVICE_RUNNER_SYNTHESIZED_GESTURE_POLICY kind=%@ axHealth=%@ frameSource=screenshot keyboardPolicy=%@ fallbackPolicy=%@ fallbackAllowed=%@ fallbackAttempted=%@",
+      "AGENT_DEVICE_RUNNER_SYNTHESIZED_GESTURE_POLICY kind=%@ axHealth=%@ frameSource=window keyboardPolicy=%@ fallbackPolicy=%@ fallbackAllowed=%@ fallbackAttempted=%@",
       kind.rawValue,
       context.accessibilityHealth.rawValue,
       context.keyboardPolicy.rawValue,
