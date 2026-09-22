@@ -1,4 +1,8 @@
-import { foldPoseForHingeAngle, type FoldPose } from '@agent-device/contracts/device';
+import {
+  type SetFoldPoseInput,
+  foldPoseForHingeAngle,
+  type FoldPose,
+} from '@agent-device/contracts/device';
 import {
   FOLD_SCREEN_COORDINATE_SPACE,
   type FoldScreenReport,
@@ -30,25 +34,28 @@ const POSE_UNSETTLED_HINT =
 /** Sets a simulator hinge through guest HID and verifies the pose through CoreDevice. */
 export async function setAppleFoldPose(
   device: DeviceInfo,
-  pose: FoldPose,
+  input: SetFoldPoseInput,
   options: { signal?: AbortSignal } = {},
 ): Promise<SetFoldPoseResult> {
   options.signal?.throwIfAborted();
   requireSimulatorDevice(device, 'fold');
+  const intent = input;
+  const targetAngle = intent.keyframes?.at(-1)?.angle;
+  const pose = intent.pose ?? foldPoseForHingeAngle(targetAngle!)!;
   const inventory = await queryAppleDisplayInventory(device, { signal: options.signal });
   requireFoldableInventory(device, inventory);
 
-  await sendSimulatorFoldPose(device.id, pose, options.signal);
+  await sendSimulatorFoldPose(device.id, intent.keyframes ?? pose, options.signal);
   emitDiagnostic({
     level: 'info',
     phase: 'apple_fold_pose_dispatched',
     data: { deviceId: device.id, pose },
   });
 
-  const hingeAngleDegrees = await awaitHingePose(device, pose, options.signal);
+  const hingeAngleDegrees = await awaitHingePose(device, pose, options.signal, targetAngle);
   const litPanel = await readLitPanel(device, options.signal);
   return {
-    pose,
+    pose: foldPoseForHingeAngle(hingeAngleDegrees)!,
     hingeAngleDegrees,
     ...(litPanel ? { screen: screenReport(litPanel) } : {}),
   };
@@ -88,6 +95,7 @@ async function awaitHingePose(
   device: DeviceInfo,
   pose: FoldPose,
   signal: AbortSignal | undefined,
+  targetAngle?: number,
 ): Promise<number> {
   let observed: number | undefined;
   let previous: number | undefined;
@@ -95,16 +103,69 @@ async function awaitHingePose(
     signal?.throwIfAborted();
     previous = observed;
     observed = await readAppleHingeAngle(device, { signal });
-    if (foldPoseForHingeAngle(observed) !== pose) continue;
-    if (pose !== 'half-open') return observed;
-    if (previous !== undefined && isSettledHalfOpenPair(observed, previous)) {
-      return observed;
-    }
+    if (isVerifiedHingePose(observed, previous, pose, targetAngle)) return observed;
   }
+  throw hingeVerificationError(device, pose, observed, previous, targetAngle);
+}
+
+function isVerifiedHingePose(
+  observed: number,
+  previous: number | undefined,
+  pose: FoldPose,
+  targetAngle: number | undefined,
+): boolean {
+  if (targetAngle !== undefined) return isSettledTargetAngle(observed, previous, targetAngle);
+  if (foldPoseForHingeAngle(observed) !== pose) return false;
+  return (
+    pose !== 'half-open' || (previous !== undefined && isSettledHalfOpenPair(observed, previous))
+  );
+}
+
+function isSettledTargetAngle(
+  observed: number,
+  previous: number | undefined,
+  targetAngle: number,
+): boolean {
+  if (!matchesTargetAngle(observed, targetAngle)) return false;
+  if (targetAngle === 0 || targetAngle === 180) return true;
+  return (
+    previous !== undefined &&
+    matchesTargetAngle(previous, targetAngle) &&
+    Math.abs(observed - previous) <= IOS_FOLD_POSE_STABLE_DEGREES
+  );
+}
+
+function matchesTargetAngle(
+  observed: number | undefined,
+  targetAngle: number | undefined,
+): boolean {
+  return (
+    targetAngle === undefined ||
+    (observed !== undefined && Math.abs(observed - targetAngle) <= IOS_FOLD_POSE_STABLE_DEGREES)
+  );
+}
+
+function hingeVerificationError(
+  device: DeviceInfo,
+  pose: FoldPose,
+  observed: number | undefined,
+  previous: number | undefined,
+  targetAngle: number | undefined,
+): AppError {
+  if (!matchesTargetAngle(observed, targetAngle)) {
+    return new AppError('COMMAND_FAILED', 'The hinge did not reach the final keyframe angle', {
+      reason: 'fold-angle-unverified',
+      targetAngleDegrees: targetAngle,
+      hingeAngleDegrees: observed,
+      deviceId: device.id,
+    });
+  }
+  if (targetAngle !== undefined && observed !== undefined)
+    return unsettledPoseError(device, foldPoseForHingeAngle(observed)!, observed, previous);
   if (observed !== undefined && pose === 'half-open' && foldPoseForHingeAngle(observed) === pose) {
-    throw unsettledHalfOpenPoseError(device, observed, previous);
+    return unsettledPoseError(device, pose, observed, previous);
   }
-  throw unverifiedPoseError(device, pose, observed);
+  return unverifiedPoseError(device, pose, observed);
 }
 
 /**
@@ -142,16 +203,17 @@ function unverifiedPoseError(device: DeviceInfo, pose: FoldPose, observed: numbe
 }
 
 /** The hinge was seen `half-open` and never came to rest inside that interval. */
-function unsettledHalfOpenPoseError(
+function unsettledPoseError(
   device: DeviceInfo,
+  pose: FoldPose,
   observed: number,
   previous: number | undefined,
 ) {
   return new AppError(
     'COMMAND_FAILED',
-    `${device.name} was observed half-open at ${observed}° but did not settle: ${IOS_FOLD_POSE_SETTLE_ATTEMPTS} hinge reads never held two consecutive half-open angles within ${IOS_FOLD_POSE_STABLE_DEGREES}° of each other`,
+    `${device.name} was observed ${pose} at ${observed}° but did not settle: ${IOS_FOLD_POSE_SETTLE_ATTEMPTS} hinge reads never held two consecutive angles within ${IOS_FOLD_POSE_STABLE_DEGREES}° of each other`,
     {
-      ...hingePoseDetails(device, 'half-open', observed),
+      ...hingePoseDetails(device, pose, observed),
       reason: 'fold-pose-unsettled',
       ...(previous === undefined ? {} : { previousHingeAngleDegrees: previous }),
       hint: POSE_UNSETTLED_HINT,

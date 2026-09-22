@@ -144,6 +144,20 @@ Local headless tests verified all three poses, panel switching, and an inner-pan
 Physical devices, logged-out hosts, and hosted CI are unverified; Duo coverage remains local.
 Absence of a public setter did not establish that Device Hub was required.
 
+### Timed hinge trajectories
+
+`fold` accepts either a preset or 2–64 `{atMs, angle}` keyframes. Times start at zero and increase
+strictly up to 60 seconds; angles stay in 0–180°. A single simulator process interpolates linearly
+against a monotonic clock at approximately 60Hz, skipping missed frames instead of extending the
+timeline. Equal angles express holds. Preparation and final verification are outside motion time.
+Cancellation sends SIGTERM to simctl before a bounded SIGKILL escalation, allowing it to terminate
+the guest helper. Abruptly killing simctl can orphan the animation. A live cancellation at two
+seconds removed the guest process and left 67.9° unchanged beyond the five-second deadline. No automatic reset
+runs on cancellation. Final custom angles require a readback within 0.5° and the existing interior
+stability check; category agreement alone is insufficient. Shared golden fixtures define native
+and TypeScript validation. Refs expire on successful or interrupted mutation through the existing
+fold request policy. Hosted Duo tests remain local-only.
+
 ## Pose control: Device Hub's control, CoreDevice's verdict
 
 `agent-device fold` sets the pose, and the split above still holds: the press is not evidence,
