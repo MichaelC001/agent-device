@@ -28,10 +28,18 @@ test('every operation on the factory rejects, naming itself and the platform', a
   assert.deepEqual(failures.filter(Boolean), []);
 });
 
-test('a fused double-click is left undefined, not denied, so a shared series reports the gap', () => {
+test('optional operations are left undefined, not denied, so shared dispatch keeps its fallback semantics', () => {
   const interactor = createUnsupportedInteractor('web');
 
+  // A fused double-click has no shared-series stand-in, the system buttons ride fact-gated
+  // binders, and neither the clipboard nor a TV remote has a shared fallback either: an absent
+  // member is the owner's absence, a throw would fake one.
   assert.equal(interactor.doubleTap, undefined);
+  assert.equal(interactor.home, undefined);
+  assert.equal(interactor.appSwitcher, undefined);
+  assert.equal(interactor.readClipboard, undefined);
+  assert.equal(interactor.writeClipboard, undefined);
+  assert.equal(interactor.tvRemote, undefined);
 });
 
 test('a rejection carries no partial result the caller could mistake for success', async () => {
