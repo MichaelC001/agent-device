@@ -56,14 +56,24 @@ int main(int argc, const char *argv[]) {
 
 #else
 #import <UIKit/UIKit.h>
+#if TARGET_OS_IOS
+#import <UserNotifications/UserNotifications.h>
+#endif
 
 @interface AgentDeviceRunnerViewController : UIViewController
 @property(nonatomic, strong) UILabel *alertActionStatus;
+@property(nonatomic, strong) UILabel *alertActivationBusyAnswer;
 @property(nonatomic, assign) NSUInteger firstAlertActions;
 @property(nonatomic, assign) NSUInteger replacementAlertActions;
 @property(nonatomic, assign) BOOL alertFixtureStarted;
 @property(nonatomic, strong) NSTimer *alertActivationBusyBackstop;
+@property(nonatomic, strong) NSTimer *alertBannerRepost;
 @end
+
+#if TARGET_OS_IOS
+@interface AgentDeviceRunnerViewController () <UNUserNotificationCenterDelegate>
+@end
+#endif
 
 @implementation AgentDeviceRunnerViewController
 
@@ -72,15 +82,21 @@ int main(int argc, const char *argv[]) {
 // may receive an event: the app keeps reporting work in flight, which is the state that cost an alert
 // command its whole deadline in #2546. It stops the moment an alert button is answered, since that
 // answer is the event the runner is trying to land, and the backstop stops it even when no answer
-// arrives so a regressed run finishes rather than waiting out XCTest's own timeout. A layer
+// arrives so a regressed run finishes rather than waiting out XCTest's own timeout. The test passes
+// the backstop after `--agent-device-alert-activation-busy`, sized to outlast its whole resolution
+// and activation budget, so a slow host cannot end the busy state before the answer lands. A layer
 // animation on its own is not enough; only a UIView animation counts as in-flight work here.
-static NSTimeInterval const kAgentDeviceAlertActivationBusyWindow = 20.0;
+static NSTimeInterval AgentDeviceAlertActivationBusyWindow(void) {
+  NSArray<NSString *> *arguments = NSProcessInfo.processInfo.arguments;
+  NSUInteger flag = [arguments indexOfObject:@"--agent-device-alert-activation-busy"];
+  return flag + 1 < arguments.count ? arguments[flag + 1].doubleValue : 0;
+}
 
 - (void)startAlertActivationBusy {
   if (self.alertActivationBusyBackstop != nil) {
     return;
   }
-  self.alertActivationBusyBackstop = [NSTimer scheduledTimerWithTimeInterval:kAgentDeviceAlertActivationBusyWindow
+  self.alertActivationBusyBackstop = [NSTimer scheduledTimerWithTimeInterval:AgentDeviceAlertActivationBusyWindow()
                                                                       target:self
                                                                     selector:@selector(stopAlertActivationBusy)
                                                                     userInfo:nil
@@ -99,6 +115,57 @@ static NSTimeInterval const kAgentDeviceAlertActivationBusyWindow = 20.0;
   self.alertActionStatus.transform = CGAffineTransformIdentity;
   [self.alertActivationBusyBackstop invalidate];
   self.alertActivationBusyBackstop = nil;
+}
+
+// A banner from this app, shown over its own alert and re-posted before the previous one expires so
+// one is on screen for as long as the first alert is unanswered. XCTest treats such a banner as an
+// interruption of every event aimed at the app (#2546's late tap, from the banner side).
+- (void)startAlertBannerThen:(dispatch_block_t)presentAlert {
+  UNUserNotificationCenter *center = UNUserNotificationCenter.currentNotificationCenter;
+  center.delegate = self;
+  [center requestAuthorizationWithOptions:UNAuthorizationOptionAlert
+                        completionHandler:^(BOOL granted, NSError *error) {
+                          (void)error;
+                          if (!granted) {
+                            return;
+                          }
+                          dispatch_async(dispatch_get_main_queue(), ^{
+                            presentAlert();
+                            [self postAlertBanner];
+                            self.alertBannerRepost = [NSTimer scheduledTimerWithTimeInterval:2.0
+                                                                                      target:self
+                                                                                    selector:@selector(postAlertBanner)
+                                                                                    userInfo:nil
+                                                                                     repeats:YES];
+                          });
+                        }];
+}
+
+- (void)postAlertBanner {
+  UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+  content.title = @"Agent Device banner";
+  content.body = @"Shown over the alert fixture";
+  UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:NSUUID.UUID.UUIDString
+                                                                        content:content
+                                                                        trigger:nil];
+  [UNUserNotificationCenter.currentNotificationCenter addNotificationRequest:request withCompletionHandler:nil];
+}
+
+- (void)stopAlertBanner {
+  if (self.alertBannerRepost == nil) {
+    return;
+  }
+  [self.alertBannerRepost invalidate];
+  self.alertBannerRepost = nil;
+  [UNUserNotificationCenter.currentNotificationCenter removeAllDeliveredNotifications];
+}
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions options))completionHandler {
+  (void)center;
+  (void)notification;
+  completionHandler(UNNotificationPresentationOptionBanner);
 }
 
 
@@ -123,7 +190,12 @@ static NSTimeInterval const kAgentDeviceAlertActivationBusyWindow = 20.0;
         ? UIAlertActionStyleCancel : UIAlertActionStyleDefault;
     [alert addAction:[UIAlertAction actionWithTitle:buttonTitle style:style handler:^(UIAlertAction *action) {
       (void)action;
+      if (!replacement) {
+        self.alertActivationBusyAnswer.text = self.alertActivationBusyBackstop != nil
+            ? @"Answered while busy" : @"Answered after the app went idle";
+      }
       [self stopAlertActivationBusy];
+      [self stopAlertBanner];
       if (replacement) {
         self.replacementAlertActions += 1;
       } else {
@@ -145,9 +217,16 @@ static NSTimeInterval const kAgentDeviceAlertActivationBusyWindow = 20.0;
   if (!self.alertFixtureStarted &&
       [NSProcessInfo.processInfo.arguments containsObject:@"--agent-device-alert-replacement-regression"]) {
     self.alertFixtureStarted = YES;
-    [self presentAlertFixtureReplacement:NO];
-    if ([NSProcessInfo.processInfo.arguments containsObject:@"--agent-device-alert-activation-busy"]) {
-      [self startAlertActivationBusy];
+    dispatch_block_t presentAlert = ^{
+      [self presentAlertFixtureReplacement:NO];
+      if ([NSProcessInfo.processInfo.arguments containsObject:@"--agent-device-alert-activation-busy"]) {
+        [self startAlertActivationBusy];
+      }
+    };
+    if ([NSProcessInfo.processInfo.arguments containsObject:@"--agent-device-alert-banner"]) {
+      [self startAlertBannerThen:presentAlert];
+    } else {
+      presentAlert();
     }
   }
 }
@@ -183,6 +262,19 @@ static NSTimeInterval const kAgentDeviceAlertActivationBusyWindow = 20.0;
     self.alertActionStatus = label;
     label.accessibilityIdentifier = @"agent-device-alert-actions";
     [self updateAlertActionStatus];
+  }
+
+  if ([NSProcessInfo.processInfo.arguments containsObject:@"--agent-device-alert-activation-busy"]) {
+    UILabel *busyAnswer = [[UILabel alloc] init];
+    busyAnswer.text = @"Unanswered";
+    busyAnswer.accessibilityIdentifier = @"agent-device-alert-busy-answer";
+    busyAnswer.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:busyAnswer];
+    [NSLayoutConstraint activateConstraints:@[
+      [busyAnswer.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+      [busyAnswer.topAnchor constraintEqualToAnchor:label.bottomAnchor constant:24],
+    ]];
+    self.alertActivationBusyAnswer = busyAnswer;
   }
 
   if ([NSProcessInfo.processInfo.arguments containsObject:@"--agent-device-text-entry-regression"]) {
