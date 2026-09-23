@@ -54,6 +54,21 @@ enum RunnerAppScreenCaptureFailure: String, Error {
   }
 }
 
+extension RunnerTests {
+  /// The target rule, kept apart from the two queries so the rule itself is testable: an unresolved
+  /// window asks the system surface, and nothing else does.
+  func selectObservedScreenCapture(
+    resolving: () -> Result<CapturedAppScreen, RunnerAppScreenCaptureFailure>,
+    fallingBack: () -> Result<CapturedAppScreen, RunnerAppScreenCaptureFailure>
+  ) -> Result<CapturedAppScreen, RunnerAppScreenCaptureFailure> {
+    let outcome = resolving()
+    if case .failure(.unresolvedWindow) = outcome {
+      return fallingBack()
+    }
+    return outcome
+  }
+}
+
 #if canImport(UIKit) && os(iOS)
 extension RunnerTests {
   /// Captures the display hosting `app` instead of `XCUIScreen.main`.
@@ -103,19 +118,6 @@ extension RunnerTests {
     )
   }
 
-  /// The target rule, kept apart from the two queries so the rule itself is testable: an unresolved
-  /// window asks the system surface, and nothing else does.
-  func selectObservedScreenCapture(
-    resolving: () -> Result<CapturedAppScreen, RunnerAppScreenCaptureFailure>,
-    fallingBack: () -> Result<CapturedAppScreen, RunnerAppScreenCaptureFailure>
-  ) -> Result<CapturedAppScreen, RunnerAppScreenCaptureFailure> {
-    let outcome = resolving()
-    if case .failure(.unresolvedWindow) = outcome {
-      return fallingBack()
-    }
-    return outcome
-  }
-
   private static func resolveCapturedAppScreen(
     app: XCUIApplication
   ) -> Result<CapturedAppScreen, RunnerAppScreenCaptureFailure> {
@@ -138,6 +140,12 @@ extension RunnerTests {
       return .failure(.unrenderableImage)
     }
     guard let cgImage = runnerCGImage(from: upright) else {
+      return .failure(.unrenderableImage)
+    }
+    // A zero-pixel image is a capture that did not happen, not a tiny one. Refusing it here — at the
+    // type that owns the fact — keeps a required consumer (a recording sizing its writer from this
+    // frame) from mistaking it for a usable frame and falling back to an untyped error (#2728).
+    guard cgImage.width > 0, cgImage.height > 0 else {
       return .failure(.unrenderableImage)
     }
     return .success(
