@@ -44,9 +44,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 const available = Object.freeze({ available: true } as const);
 /**
- * Limrun's iOS direct session drives text and touch but exposes no portable gesture execution —
- * its interactor's own `performGesture` refuses with this wording. Stating it as a fact refuses at
- * admission instead of mid-execution (ADR 0019 §6), keeping the agent-facing hint identical.
+ * Limrun's iOS direct session drives text and touch but exposes no portable gesture execution.
+ * Stating it as a fact refuses at admission instead of mid-execution (ADR 0019 §6), and it is
+ * the only refusal the caller sees: the leg's interactor carries no gesture member at all.
  */
 const iosGestureUnavailable = Object.freeze({
   available: false,
@@ -228,8 +228,9 @@ export function bindLimrunInteractionOperations(
  * `back`/`orientation`/`tvRemote` differ by direct-session platform, unlike focus/type:
  * the Android leg rides `session.dependencies.android.createInteractor` (`android.ts`) — the
  * SAME factory the local Android family binds, so it carries the identical cell table (parity
- * with the local owner, including the `device.target === 'tv'` gate for `tvRemote`). The iOS leg
- * (`ios.ts`) implements `back`/`setOrientation` but explicitly refuses `tvRemote`.
+ * with the local owner, including the `device.target === 'tv'` gate for `tvRemote`). The iOS
+ * direct session is a phone/tablet surface with no remote receiver, so its fact refuses
+ * `tvRemote` and its interactor carries no such member.
  */
 export function limrunNavigationOperationFacts(
   device: DeviceInfo,
@@ -267,8 +268,7 @@ export function limrunNavigationOperationFacts(
  * `clipboard` shares the split its siblings have: the Android leg rides
  * `session.dependencies.android.createInteractor` — the SAME factory the local Android family
  * binds, so `cmd clipboard get/set text` reaches the device exactly as it does locally — while
- * the iOS leg's own `readClipboard`/`writeClipboard` throw, so both cells stay unavailable there
- * and carry the interactor's wording.
+ * the iOS direct session has no pasteboard transport, so both cells stay unavailable there.
  */
 export function limrunClipboardOperationFacts(
   device: DeviceInfo,

@@ -322,10 +322,6 @@ class LimrunIosInteractor implements Interactor {
     await this.session.client.pressKey('escape');
   }
 
-  async home(): Promise<never> {
-    throw unsupported('home', 'Limrun iOS direct sessions do not expose home yet.');
-  }
-
   async setOrientation(orientation: DeviceRotation): Promise<void> {
     if (orientation === 'portrait-upside-down') {
       throw unsupported(
@@ -334,29 +330,6 @@ class LimrunIosInteractor implements Interactor {
       );
     }
     await this.session.client.setOrientation(orientation === 'portrait' ? 'Portrait' : 'Landscape');
-  }
-
-  async performGesture(): Promise<never> {
-    throw unsupported(
-      'gesture',
-      'Limrun iOS direct sessions do not expose portable gesture execution yet.',
-    );
-  }
-
-  async appSwitcher(): Promise<never> {
-    throw unsupported('app-switcher', 'Limrun iOS direct sessions do not expose app switcher yet.');
-  }
-
-  async tvRemote(): Promise<never> {
-    throw unsupported('tv-remote', 'Limrun iOS direct sessions do not expose tv remote control.');
-  }
-
-  async readClipboard(): Promise<never> {
-    throw unsupported('clipboard', 'Limrun iOS direct sessions do not expose clipboard read yet.');
-  }
-
-  async writeClipboard(): Promise<never> {
-    throw unsupported('clipboard', 'Limrun iOS direct sessions do not expose clipboard write yet.');
   }
 
   async setSetting(): Promise<never> {

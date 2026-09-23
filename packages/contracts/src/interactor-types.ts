@@ -356,11 +356,29 @@ export type Interactor = {
   }>;
   gestureViewport?(): Promise<Rect>;
   back(mode?: BackMode): Promise<void>;
-  home(): Promise<void>;
+  /**
+   * Optional (parity with `actionButton`): opens the springboard, a control not every owner
+   * carries. An owner without it leaves it undefined; its fact refuses the press before binding,
+   * and the system-button binder fails closed rather than resolving an absent member as a
+   * successful no-op.
+   */
+  home?(): Promise<void>;
   setOrientation(orientation: DeviceRotation): Promise<{ orientation?: DeviceRotation } | void>;
   performGesture?(plan: GesturePlan): Promise<Record<string, unknown> | void>;
-  appSwitcher(): Promise<void>;
-  tvRemote(button: TvRemoteButton, durationMs?: number): Promise<void>;
+  /**
+   * Optional (parity with `home`): opens the recents surface, a control not every owner carries.
+   * An owner without it leaves it undefined; its fact refuses the press before binding, and the
+   * system-button binder fails closed rather than resolving an absent member as a successful
+   * no-op.
+   */
+  appSwitcher?(): Promise<void>;
+  /**
+   * Optional (parity with `home`): presses one TV remote key, a control only TV-capable owners
+   * carry. An owner without it leaves it undefined; its fact refuses the press before binding,
+   * and the TV remote binder fails closed rather than resolving an absent member as a silent
+   * no-op.
+   */
+  tvRemote?(button: TvRemoteButton, durationMs?: number): Promise<void>;
   /**
    * Optional (parity with `keyboardDismiss`): presses the iPhone/iPad Action Button, hardware only
    * the Apple owner carries. An owner without the button leaves it undefined; its fact refuses the
@@ -374,8 +392,17 @@ export type Interactor = {
   keyboardDismiss?(): Promise<KeyboardDismissResult>;
   /** Optional: platforms with no keyboard-return concept leave it undefined. */
   keyboardEnter?(): Promise<KeyboardEnterResult>;
-  readClipboard(): Promise<string>;
-  writeClipboard(text: string): Promise<void>;
+  /**
+   * Optional (parity with `readSetting`): the owner's pasteboard read. An owner with no clipboard
+   * surface leaves both halves undefined; its fact refuses the half before binding, and the
+   * clipboard binder fails closed rather than resolving an absent member as an empty answer.
+   */
+  readClipboard?(): Promise<string>;
+  /**
+   * Optional (parity with `readClipboard`): the owner's pasteboard write, with the same
+   * fact-then-guard contract as the read.
+   */
+  writeClipboard?(text: string): Promise<void>;
   setSetting(
     setting: string,
     state: string,
