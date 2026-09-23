@@ -12,7 +12,7 @@ import {
   IOS_SIMCTL_LIST_TIMEOUT_MS,
   IOS_SIMULATOR_FOCUS_TIMEOUT_MS,
 } from './config.ts';
-import { buildSimctlArgsForDevice } from './simctl.ts';
+import { buildSimctlArgsForDevice, readSimctlDeviceState } from './simctl.ts';
 import { runAppleToolCommand, runXcrun } from './tool-provider.ts';
 
 const simulatorReadiness = createScopedProvider<
@@ -237,18 +237,5 @@ async function getSimulatorState(device: DeviceInfo, signal?: AbortSignal): Prom
     timeoutMs: IOS_SIMCTL_LIST_TIMEOUT_MS,
   });
   if (result.exitCode !== 0) return null;
-
-  try {
-    const payload = JSON.parse(result.stdout) as {
-      devices: Record<string, { udid: string; state: string }[]>;
-    };
-
-    for (const runtime of Object.values(payload.devices ?? {})) {
-      const match = runtime.find((entry) => entry.udid === device.id);
-      if (match) return match.state;
-    }
-    return null;
-  } catch {
-    return null;
-  }
+  return readSimctlDeviceState(result.stdout, device.id);
 }
