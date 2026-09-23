@@ -3,7 +3,6 @@ import {
   isRequestCanceledError,
   AppError,
 } from '@agent-device/kernel/errors';
-import { RUNNER_COMMAND_TRAIT_MANIFEST } from '../runner-command-manifest.ts';
 import type { RequestProgressEvent } from '@agent-device/contracts/progress';
 import { beforeEach, test, onTestFinished, vi } from 'vitest';
 import assert from 'node:assert/strict';
@@ -30,14 +29,15 @@ vi.mock('../runner-macos-products.ts', async () => {
 });
 
 import type { DeviceInfo } from '@agent-device/kernel/device';
-import { isReadOnlyRunnerCommand } from '../runner-command-traits.ts';
+import {
+  RUNNER_COMMAND_TRAIT_MANIFEST,
+  isReadOnlyRunnerCommand,
+} from '../runner-command-traits.ts';
 import {
   isRetryableRunnerError,
-  resolveRunnerEarlyExitHint,
   shouldRetryRunnerConnectError,
-  withRunnerCommandId,
-  type RunnerCommand,
-} from '../runner-contract.ts';
+} from '../runner-error-classification.ts';
+import { withRunnerCommandId, type RunnerCommand } from '../runner-contract.ts';
 import {
   resolveRunnerBuildDestination,
   resolveRunnerDestination,
@@ -413,25 +413,6 @@ test('assertSafeDerivedCleanup allows cleaning override path under project .tmp'
       AGENT_DEVICE_IOS_RUNNER_DERIVED_PATH: derivedPath,
     });
   });
-});
-
-test('resolveRunnerEarlyExitHint surfaces busy-connecting guidance', () => {
-  const hint = resolveRunnerEarlyExitHint(
-    'Runner did not accept connection (xcodebuild exited early)',
-    'Ineligible destinations for the "AgentDeviceRunner" scheme:\n{ error:Device is busy (Connecting to iPhone) }',
-    '',
-  );
-  assert.match(hint, /still connecting/i);
-});
-
-test('resolveRunnerEarlyExitHint falls back to runner connect timeout hint', () => {
-  const hint = resolveRunnerEarlyExitHint(
-    'Runner did not accept connection (xcodebuild exited early)',
-    '',
-    'xcodebuild failed unexpectedly',
-  );
-  assert.match(hint, /retry runner startup/i);
-  assert.match(hint, /pnpm clean:xcuitest/i);
 });
 
 test('shouldRetryRunnerConnectError does not retry xcodebuild early-exit errors', () => {
