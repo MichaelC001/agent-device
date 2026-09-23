@@ -194,8 +194,17 @@ extension RunnerTests {
     currentApp = app
     currentBundleId = nil
     currentAppProcessIdentifier = nil
+    resetTargetBoundState()
+  }
+
+  /// State that belongs to the currently bound target and must not outlive it: the text-entry tap
+  /// witness, the fresh-process snapshot warmup exemption, and the last-written per-command log
+  /// markers. Every site that binds, rebinds, or drops the target runs this.
+  func resetTargetBoundState() {
     clearRememberedTextEntryTap()
     snapshotXCTestPenaltyWarmupExemptionPending = false
+    lastLoggedFastAppGuardLine = nil
+    lastLoggedGesturePolicyLines.removeAll()
   }
 
   func invalidateCachedTarget(reason: String) {
@@ -205,8 +214,7 @@ extension RunnerTests {
     currentApp = nil
     currentBundleId = nil
     currentAppProcessIdentifier = nil
-    clearRememberedTextEntryTap()
-    snapshotXCTestPenaltyWarmupExemptionPending = false
+    resetTargetBoundState()
   }
 
   func resetTargetAfterExternalRelaunch() -> Response {
@@ -236,7 +244,7 @@ extension RunnerTests {
     )
     currentApp = candidate
     currentAppProcessIdentifier = observedProcessIdentifier
-    clearRememberedTextEntryTap()
+    resetTargetBoundState()
     clearSnapshotXCTestChannelPenalty(reason: "target_process_changed")
     clearPrivateAXAcceptedDepth(reason: "target_process_changed")
     snapshotXCTestPenaltyWarmupExemptionPending = true
@@ -274,20 +282,24 @@ extension RunnerTests {
 
   func canUseFastForegroundAppGuard(
     activeApp: XCUIApplication,
-    requestedBundleId: String?,
-    command: CommandType
+    requestedBundleId: String?
   ) -> Bool {
     guard let requestedBundleId, currentBundleId == requestedBundleId, currentApp != nil else {
       return false
     }
     guard activeApp.state == .runningForeground else { return false }
-    NSLog(
-      "AGENT_DEVICE_RUNNER_FAST_APP_GUARD command=%@ bundle=%@ state=%d",
-      String(describing: command),
-      requestedBundleId,
-      activeApp.state.rawValue
-    )
+    writeFastAppGuardMarker(bundleId: requestedBundleId, state: activeApp.state)
     return true
+  }
+
+  func writeFastAppGuardMarker(bundleId: String, state: XCUIApplication.State) {
+    // The command is on the adjacent COMMAND_ACCEPTED line; repeating it here would make a deduped
+    // marker read as if only that command ever passed the guard.
+    let line = "AGENT_DEVICE_RUNNER_FAST_APP_GUARD bundle=\(bundleId) state=\(state.rawValue)"
+    if lastLoggedFastAppGuardLine != line {
+      lastLoggedFastAppGuardLine = line
+      runnerMarkerWriter(line)
+    }
   }
 
   /// The pid of the one other application holding an active accessibility session, or nil unless
@@ -340,8 +352,7 @@ extension RunnerTests {
     currentApp = target
     currentBundleId = bundleId
     currentAppProcessIdentifier = Self.processIdentifier(of: target)
-    clearRememberedTextEntryTap()
-    snapshotXCTestPenaltyWarmupExemptionPending = false
+    resetTargetBoundState()
     beginFirstInteractionStabilization()
     return target
   }
@@ -507,3 +518,33 @@ extension RunnerTests {
     usleep(useconds_t(delay * 1_000_000))
   }
 }
+
+#if AGENT_DEVICE_RUNNER_UNIT_TESTS
+extension RunnerTests {
+  func testResettingTargetBoundStateForgetsTheLastWrittenMarkers() {
+    defer { invalidateCachedTarget(reason: "unit_test_cleanup") }
+    lastLoggedFastAppGuardLine = "AGENT_DEVICE_RUNNER_FAST_APP_GUARD bundle=app state=4"
+    lastLoggedGesturePolicyLines[.scroll] = "AGENT_DEVICE_RUNNER_SYNTHESIZED_GESTURE_POLICY kind=scroll"
+    resetTargetBoundState()
+    XCTAssertNil(lastLoggedFastAppGuardLine, "a rebind must state the guard once more")
+    XCTAssertTrue(lastLoggedGesturePolicyLines.isEmpty, "a rebind must state the policy once more")
+  }
+
+  func testFastAppGuardMarkerWritesOnceUntilTheFactChanges() {
+    var written: [String] = []
+    runnerMarkerWriter = { written.append($0) }
+    defer {
+      runnerMarkerWriter = { NSLog("%@", $0) }
+      invalidateCachedTarget(reason: "unit_test_cleanup")
+    }
+    writeFastAppGuardMarker(bundleId: "com.example.app", state: .runningForeground)
+    writeFastAppGuardMarker(bundleId: "com.example.app", state: .runningForeground)
+    XCTAssertEqual(written.count, 1, "a repeated fact writes no second line")
+    writeFastAppGuardMarker(bundleId: "com.example.other", state: .runningForeground)
+    XCTAssertEqual(written.count, 2, "a changed fact writes a new line")
+    resetTargetBoundState()
+    writeFastAppGuardMarker(bundleId: "com.example.other", state: .runningForeground)
+    XCTAssertEqual(written.count, 3, "a rebind states the same fact once more")
+  }
+}
+#endif

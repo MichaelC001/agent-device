@@ -1569,8 +1569,7 @@ extension RunnerTests {
 
       let skipExistenceWait = canUseFastForegroundAppGuard(
         activeApp: activeApp,
-        requestedBundleId: requestedBundleId,
-        command: command.command
+        requestedBundleId: requestedBundleId
       )
       if !skipExistenceWait && !activeApp.waitForExistence(timeout: appExistenceTimeout) {
         if let bundleId = requestedBundleId {
@@ -1592,8 +1591,7 @@ extension RunnerTests {
         }
         let skipInteractionExistenceWait = canUseFastForegroundAppGuard(
           activeApp: activeApp,
-          requestedBundleId: requestedBundleId,
-          command: command.command
+          requestedBundleId: requestedBundleId
         )
         if !skipInteractionExistenceWait && !activeApp.waitForExistence(timeout: 2) {
           if let bundleId = requestedBundleId {

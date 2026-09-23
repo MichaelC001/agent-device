@@ -139,26 +139,60 @@ extension RunnerTests {
     fallbackAttempted: Bool
   ) {
 #if os(iOS)
-    guard let context else {
-      NSLog(
-        "AGENT_DEVICE_RUNNER_SYNTHESIZED_GESTURE_POLICY kind=%@ context=unavailable fallbackAttempted=%@",
-        kind.rawValue,
-        fallbackAttempted.description
-      )
-      return
-    }
-    NSLog(
-      "AGENT_DEVICE_RUNNER_SYNTHESIZED_GESTURE_POLICY kind=%@ axHealth=%@ frameSource=window keyboardPolicy=%@ fallbackPolicy=%@ fallbackAllowed=%@ fallbackAttempted=%@",
-      kind.rawValue,
-      context.accessibilityHealth.rawValue,
-      context.keyboardPolicy.rawValue,
-      context.fallbackPolicy.rawValue,
-      context.allowsXCTestCoordinateFallback.description,
-      fallbackAttempted.description
+    let line = Self.synthesizedGesturePolicyLine(
+      kind: kind,
+      context: context,
+      fallbackAttempted: fallbackAttempted
     )
+    // The same decision for the same gesture kind on every command is one line; a changed policy
+    // (AX health, keyboard, fallback) is a new one.
+    if lastLoggedGesturePolicyLines[kind] != line {
+      lastLoggedGesturePolicyLines[kind] = line
+      runnerMarkerWriter(line)
+    }
 #endif
   }
+
+  static func synthesizedGesturePolicyLine(
+    kind: SynthesizedGesturePolicyKind,
+    context: SynthesizedCoordinateContext?,
+    fallbackAttempted: Bool
+  ) -> String {
+    guard let context else {
+      return "AGENT_DEVICE_RUNNER_SYNTHESIZED_GESTURE_POLICY kind=\(kind.rawValue)"
+        + " context=unavailable fallbackAttempted=\(fallbackAttempted)"
+    }
+    return "AGENT_DEVICE_RUNNER_SYNTHESIZED_GESTURE_POLICY kind=\(kind.rawValue)"
+      + " axHealth=\(context.accessibilityHealth.rawValue) frameSource=window"
+      + " keyboardPolicy=\(context.keyboardPolicy.rawValue)"
+      + " fallbackPolicy=\(context.fallbackPolicy.rawValue)"
+      + " fallbackAllowed=\(context.allowsXCTestCoordinateFallback)"
+      + " fallbackAttempted=\(fallbackAttempted)"
+  }
 }
+
+#if AGENT_DEVICE_RUNNER_UNIT_TESTS && os(iOS)
+extension RunnerTests {
+  func testSynthesizedGesturePolicyMarkerWritesOncePerKindUntilTheDecisionChanges() {
+    var written: [String] = []
+    runnerMarkerWriter = { written.append($0) }
+    defer {
+      runnerMarkerWriter = { NSLog("%@", $0) }
+      invalidateCachedTarget(reason: "unit_test_cleanup")
+    }
+    logSynthesizedGesturePolicyDecision(kind: .coordinateTap, context: nil, fallbackAttempted: false)
+    logSynthesizedGesturePolicyDecision(kind: .coordinateTap, context: nil, fallbackAttempted: false)
+    XCTAssertEqual(written.count, 1, "a repeated decision writes no second line")
+    logSynthesizedGesturePolicyDecision(kind: .scroll, context: nil, fallbackAttempted: false)
+    XCTAssertEqual(written.count, 2, "each gesture kind states its own decision")
+    logSynthesizedGesturePolicyDecision(kind: .coordinateTap, context: nil, fallbackAttempted: true)
+    XCTAssertEqual(written.count, 3, "a changed decision writes a new line")
+    resetTargetBoundState()
+    logSynthesizedGesturePolicyDecision(kind: .coordinateTap, context: nil, fallbackAttempted: true)
+    XCTAssertEqual(written.count, 4, "a rebind states the same decision once more")
+  }
+}
+#endif
 
 #if AGENT_DEVICE_RUNNER_UNIT_TESTS
 extension RunnerTests {
