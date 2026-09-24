@@ -12,7 +12,9 @@ import XCTest
 extension RunnerTests {
   /// Tracks one main-queue dispatch so the watchdog and the dispatched block can agree, under
   /// `mainThreadWorkLock`, on exactly one of: finished in time, or abandoned.
-  private final class MainThreadWorkState {
+  private final class MainThreadWorkState<T> {
+    let completed = DispatchSemaphore(value: 0)
+    var result: Result<T, Error>?
     var finished = false
     var abandoned = false
   }
@@ -62,24 +64,71 @@ extension RunnerTests {
     if Thread.isMainThread {
       return try work()
     }
-    var result: Result<T, Error>?
-    let semaphore = DispatchSemaphore(value: 0)
-    let workState = MainThreadWorkState()
+    mainThreadWorkLock.lock()
+    let state = enqueueMainThreadWorkLocked(operation, work)
+    mainThreadWorkLock.unlock()
+    return try awaitMainThreadWork(
+      state,
+      operation: operation,
+      timeout: timeout,
+      timeoutError: timeoutError,
+      onAbandoned: onAbandoned
+    )
+  }
+
+  /// Runs optional `work` like `runMainThreadWork`, but only while no other dispatched main-thread
+  /// work is in flight; otherwise it returns `nil` without dispatching. The check and the enqueue
+  /// happen under one hold of `mainThreadWorkLock`, the same lock every dispatch enqueues under, so
+  /// admitted work never waits in the main queue behind a command's hop. The in-flight count covers
+  /// abandoned work too: a block stays counted until it returns, and it marks itself abandoned in
+  /// the same window, so occupancy that outlived its slice is already declined here.
+  func runMainThreadWorkIfIdle<T>(
+    _ operation: String,
+    timeout: TimeInterval,
+    timeoutError: @escaping () -> Error,
+    _ work: @escaping () throws -> T
+  ) throws -> T? {
+    if Thread.isMainThread {
+      return nil
+    }
+    mainThreadWorkLock.lock()
+    guard mainThreadWorkInFlightCount == 0 else {
+      mainThreadWorkLock.unlock()
+      return nil
+    }
+    let state = enqueueMainThreadWorkLocked(operation, work)
+    mainThreadWorkLock.unlock()
+    return try awaitMainThreadWork(
+      state,
+      operation: operation,
+      timeout: timeout,
+      timeoutError: timeoutError,
+      onAbandoned: nil
+    )
+  }
+
+  private func enqueueMainThreadWorkLocked<T>(
+    _ operation: String,
+    _ work: @escaping () throws -> T
+  ) -> MainThreadWorkState<T> {
+    let state = MainThreadWorkState<T>()
+    mainThreadWorkInFlightCount += 1
     DispatchQueue.main.async {
       do {
-        result = .success(try work())
+        state.result = .success(try work())
       } catch {
-        result = .failure(error)
+        state.result = .failure(error)
       }
       self.mainThreadWorkLock.lock()
-      let abandoned = workState.abandoned
+      self.mainThreadWorkInFlightCount -= 1
+      let abandoned = state.abandoned
       if abandoned {
         self.abandonedMainThreadWorkCount -= 1
         if self.abandonedMainThreadWorkCount == 0 {
           self.abandonedMainThreadWorkSince = nil
         }
       } else {
-        workState.finished = true
+        state.finished = true
       }
       let allDrained = abandoned && self.abandonedMainThreadWorkCount == 0
       self.mainThreadWorkLock.unlock()
@@ -89,14 +138,29 @@ extension RunnerTests {
           NSLog("AGENT_DEVICE_RUNNER_ABANDONED_WORK_DRAINED")
         }
       }
-      semaphore.signal()
+      state.completed.signal()
     }
-    let waitResult = semaphore.wait(timeout: .now() + timeout)
+    return state
+  }
+
+  private func awaitMainThreadWork<T>(
+    _ state: MainThreadWorkState<T>,
+    operation: String,
+    timeout: TimeInterval,
+    timeoutError: @escaping () -> Error,
+    onAbandoned: (() -> Void)?
+  ) throws -> T {
+    let waitResult = state.completed.wait(timeout: .now() + timeout)
     if waitResult == .timedOut {
+      #if AGENT_DEVICE_RUNNER_UNIT_TESTS
+      mainThreadWorkTimedOutForTesting?()
+      #endif
+      // Work that finished before the lock was taken already stored its result: it is answered
+      // like work that finished in time, so an action that happened is never reported as a timeout.
       mainThreadWorkLock.lock()
-      let abandoned = !workState.finished
+      let abandoned = !state.finished
       if abandoned {
-        workState.abandoned = true
+        state.abandoned = true
         abandonedMainThreadWorkCount += 1
         if abandonedMainThreadWorkSince == nil {
           abandonedMainThreadWorkSince = Date()
@@ -110,10 +174,10 @@ extension RunnerTests {
           timeout
         )
         onAbandoned?()
+        throw timeoutError()
       }
-      throw timeoutError()
     }
-    switch result {
+    switch state.result {
     case .success(let value):
       return value
     case .failure(let error):

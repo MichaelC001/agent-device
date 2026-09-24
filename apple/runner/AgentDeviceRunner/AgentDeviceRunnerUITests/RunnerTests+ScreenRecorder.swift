@@ -24,14 +24,20 @@ extension RunnerTests {
     private var isStopping = false
     private var startedSession = false
     private var startError: Error?
+    #if AGENT_DEVICE_RUNNER_UNIT_TESTS
+    private var appendedFramesForTesting: [RunnerImage] = []
+    #endif
 
     init(outputPath: String, fps: Int32?) {
       self.outputPath = outputPath
       self.fps = fps
     }
 
+    /// `bootstrap` must produce the frame that sizes the writer and runs on the caller's thread.
+    /// `frame` answers each tick with an image, or `nil` to drop the tick.
     func start(
-      capture: @escaping () -> Result<CapturedAppScreen, RunnerAppScreenCaptureFailure>
+      bootstrap: @escaping () -> Result<CapturedAppScreen, RunnerAppScreenCaptureFailure>,
+      frame: @escaping () -> RunnerImage?
     ) throws {
       let url = URL(fileURLWithPath: outputPath)
       let directory = url.deletingLastPathComponent()
@@ -49,7 +55,7 @@ extension RunnerTests {
       var lastFailure: RunnerAppScreenCaptureFailure?
       let bootstrapDeadline = Date().addingTimeInterval(2.0)
       while Date() < bootstrapDeadline {
-        switch capture() {
+        switch bootstrap() {
         case .success(let captured):
           bootstrapImage = captured.image
           dimensions = CGSize(width: captured.pixelWidth, height: captured.pixelHeight)
@@ -129,8 +135,8 @@ extension RunnerTests {
       timer.setEventHandler { [weak self] in
         guard let self else { return }
         if self.shouldStop() { return }
-        guard case .success(let captured) = capture() else { return }
-        self.append(image: captured.image)
+        guard let image = frame() else { return }
+        self.append(image: image)
       }
       self.timer = timer
       timer.resume()
@@ -227,6 +233,9 @@ extension RunnerTests {
         return
       }
       lastTimestampValue = timestampValue
+      #if AGENT_DEVICE_RUNNER_UNIT_TESTS
+      appendedFramesForTesting.append(image)
+      #endif
     }
 
     private func timestampCandidateValue(for nowUptime: TimeInterval) -> Int64 {
@@ -285,6 +294,27 @@ extension RunnerTests {
 }
 
 extension RunnerTests {
+  /// Starts `recorder` on the frames `capture` produces. The bootstrap frame is taken on the calling
+  /// thread, which is main for `record start`. Each later tick is optional work: it hops to main only
+  /// while no other main-thread work is in flight, so it never queues behind a command.
+  /// A capture still running after `recordingFrameCaptureTimeout` is abandoned and its frame dropped;
+  /// its late result is never returned.
+  func startRecording(
+    _ recorder: ScreenRecorder,
+    capture: @escaping () -> Result<CapturedAppScreen, RunnerAppScreenCaptureFailure>
+  ) throws {
+    try recorder.start(bootstrap: capture) { [weak self] in
+      guard let self else { return nil }
+      return try? self.runMainThreadWorkIfIdle(
+        "recording_frame",
+        timeout: self.recordingFrameCaptureTimeout,
+        timeoutError: self.mainThreadExecutionTimeoutError
+      ) {
+        try capture().get().image
+      }
+    }
+  }
+
   /// The error a `record start` bootstrap raises when no initial frame arrived. On iOS the last capture
   /// refusal (if any) is the honest reason and travels as its own typed code; only when nothing
   /// refused — a macOS host capture, or a deadline that elapsed before any answer — does it fall back
@@ -318,6 +348,12 @@ extension RunnerTests.ScreenRecorder {
     let allocatedTimestamp = monotonicTimestampValue(for: candidateTimestampValue)
     lastTimestampValue = allocatedTimestamp
     return allocatedTimestamp
+  }
+
+  func appendedFrameSnapshotForTesting() -> [RunnerImage] {
+    lock.lock()
+    defer { lock.unlock() }
+    return appendedFramesForTesting
   }
 }
 #endif
