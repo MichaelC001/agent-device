@@ -322,6 +322,7 @@ test('attrs digest keeps explicit false/zero/empty field facts; unavailable ones
     editable: false,
     password: false,
     hintShowing: false,
+    placeholder: 'Key echo',
     selectionStart: 0,
     selectionEnd: 0,
   };
