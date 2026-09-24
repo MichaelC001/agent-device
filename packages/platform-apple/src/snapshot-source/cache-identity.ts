@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-import path from 'node:path';
 import { isCommandTimeoutError, type ExecResult } from '@agent-device/host-kit/command';
 import { COLD_TOOLCHAIN_PROBE_TIMEOUT_MS } from '../runner/apple-runner-platform.ts';
 import { snapshotSourceError, type SnapshotSourceError } from './errors.ts';
@@ -13,13 +11,17 @@ import type { SnapshotSourceHost } from './types.ts';
  * identity therefore execs one Xcode-owned binary rather than two, because a toolchain probe that
  * cannot answer fails the whole job with nothing but a cache key at stake (#2712).
  */
-export type SnapshotSourceToolchainIdentity = Readonly<{
+export type HostToolchainIdentity = Readonly<{
   xcode: string;
   macosProductVersion: string;
   macosBuild: string;
   architecture: 'arm64' | 'x86_64';
-  simulatorRuntime: string;
 }>;
+
+export type SnapshotSourceToolchainIdentity = HostToolchainIdentity &
+  Readonly<{
+    simulatorRuntime: string;
+  }>;
 
 export const SNAPSHOT_BRIDGE_SOURCE_FILENAMES = [
   'SnapshotBridge.m',
@@ -34,24 +36,27 @@ export const SNAPSHOT_BRIDGE_COMPILE_FILENAMES = [
   'SnapshotBridgeCapture.m',
 ] as const;
 
-export async function fingerprintSnapshotBridgeSource(
+/**
+ * The host's active toolchain, independent of any simulator runtime: which Xcode `xcrun` resolves
+ * against, the macOS build it runs on, and its architecture. Shared by every runtime clang build in
+ * this package, so a cache keyed on it is invalidated exactly when switching `DEVELOPER_DIR` would
+ * change what clang produces (#2796).
+ */
+export async function readHostToolchainIdentity(
   host: SnapshotSourceHost,
-  root: string,
   deadline: SnapshotSourceDeadline,
-): Promise<string> {
-  const hash = createHash('sha256');
-  for (const sourceFile of SNAPSHOT_BRIDGE_SOURCE_FILENAMES) {
-    const filePath = path.join(root, sourceFile);
-    remainingSnapshotSourceMs(deadline, 'native-source-fingerprint-deadline');
-    if (!host.exists(filePath)) {
-      throw snapshotSourceError('unsupported', 'native-source-missing', { filePath });
-    }
-    hash.update(sourceFile);
-    hash.update('\0');
-    hash.update(await host.readBinary(filePath));
-    hash.update('\0');
+): Promise<HostToolchainIdentity> {
+  // The one Xcode-owned binary this read execs: SnapshotSourceToolchainIdentity says why (#2712).
+  const xcode = await toolOutput(host, 'xcodebuild', ['-version'], deadline);
+  const macosProductVersion = await toolOutput(host, 'sw_vers', ['-productVersion'], deadline);
+  const macosBuild = await toolOutput(host, 'sw_vers', ['-buildVersion'], deadline);
+  const architecture = await toolOutput(host, 'uname', ['-m'], deadline);
+  if (architecture !== 'arm64' && architecture !== 'x86_64') {
+    throw snapshotSourceError('unsupported', 'simulator-architecture-unsupported', {
+      architecture,
+    });
   }
-  return hash.digest('hex');
+  return { xcode, macosProductVersion, macosBuild, architecture };
 }
 
 export async function readSnapshotSourceToolchain(
@@ -59,25 +64,10 @@ export async function readSnapshotSourceToolchain(
   simulatorRuntime: string,
   deadline: SnapshotSourceDeadline,
 ): Promise<SnapshotSourceToolchainIdentity> {
-  // The one Xcode-owned binary this read execs: SnapshotSourceToolchainIdentity says why (#2712).
-  const xcode = await toolOutput(host, 'xcodebuild', ['-version'], deadline);
-  const macosProductVersion = await toolOutput(host, 'sw_vers', ['-productVersion'], deadline);
-  const macosBuild = await toolOutput(host, 'sw_vers', ['-buildVersion'], deadline);
-  const architecture = await toolOutput(host, 'uname', ['-m'], deadline);
+  const identity = await readHostToolchainIdentity(host, deadline);
   const runtime = simulatorRuntime.trim();
   if (!runtime) throw snapshotSourceError('unsupported', 'simulator-runtime-missing');
-  if (architecture !== 'arm64' && architecture !== 'x86_64') {
-    throw snapshotSourceError('unsupported', 'simulator-architecture-unsupported', {
-      architecture,
-    });
-  }
-  return {
-    xcode,
-    macosProductVersion,
-    macosBuild,
-    architecture,
-    simulatorRuntime: runtime,
-  };
+  return { ...identity, simulatorRuntime: runtime };
 }
 
 async function toolOutput(

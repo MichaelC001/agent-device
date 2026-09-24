@@ -1,51 +1,51 @@
-import { expect, test } from 'vitest';
-import { existsSync } from 'node:fs';
-import path from 'node:path';
+import { expect, test, vi } from 'vitest';
 import { withAppleToolProvider, createLocalAppleToolProvider } from '../core/tool-provider.ts';
 import { IOS_SIMULATOR } from '../__tests__/device-fixtures.ts';
+import { ensureFoldHelperBinary } from './fold-helper-cache.ts';
 import { sendSimulatorFoldPose } from './simulator-hid.ts';
+
+vi.mock('./fold-helper-cache.ts', () => ({
+  ensureFoldHelperBinary: vi.fn(async () => ({ path: '/cache/fold-helper' })),
+}));
 
 const selectedDuo = { ...IOS_SIMULATOR, id: 'selected-duo' };
 
-test.each(['success', 'build', 'dispatch', 'cancel'] as const)(
-  'HID route targets the UDID, cleans temporary artifacts, and handles %s',
-  async (failure) => {
-    const calls: string[][] = [];
+test.each(['success', 'dispatch', 'cancel'] as const)(
+  'HID route spawns the cached helper on the UDID and handles %s',
+  async (outcome) => {
     const controller = new AbortController();
-    let binary = '';
+    if (outcome === 'cancel') {
+      vi.mocked(ensureFoldHelperBinary).mockImplementationOnce(async () => {
+        controller.abort(new Error('cancelled'));
+        return { path: '/cache/fold-helper' };
+      });
+    }
+    const dispatches: string[][] = [];
     await withAppleToolProvider(
       createLocalAppleToolProvider({
         runCommand: async (command, args, options) => {
           expect(command).toBe('xcrun');
           expect(options?.signal).toBe(controller.signal);
-          expect(options?.timeoutMs).toBeGreaterThan(0);
-          calls.push(args);
-          if (args.includes('clang')) {
-            binary = args.at(-1)!;
-            expect(existsSync(path.dirname(binary))).toBe(true);
-            expect(existsSync(args[args.indexOf('-o') - 1]!)).toBe(true);
-            if (failure === 'cancel') controller.abort(new Error('cancelled'));
-            return { stdout: '', stderr: 'compiler detail', exitCode: failure === 'build' ? 1 : 0 };
-          }
-          expect(args).toEqual(['simctl', 'spawn', 'selected-duo', binary, 'half-open']);
-          return { stdout: '', stderr: 'spawn detail', exitCode: failure === 'dispatch' ? 1 : 0 };
+          dispatches.push([...args]);
+          return { stdout: '', stderr: 'spawn detail', exitCode: outcome === 'dispatch' ? 1 : 0 };
         },
       }),
       async () => {
         const operation = sendSimulatorFoldPose(selectedDuo, 'half-open', controller.signal);
-        if (failure === 'success') await expect(operation).resolves.toBeUndefined();
-        else if (failure === 'cancel') await expect(operation).rejects.toThrow('cancelled');
+        if (outcome === 'success') await expect(operation).resolves.toBeUndefined();
+        else if (outcome === 'cancel') await expect(operation).rejects.toThrow('cancelled');
         else
           await expect(operation).rejects.toMatchObject({
             code: 'COMMAND_FAILED',
-            details: {
-              reason: failure === 'build' ? 'fold-helper-build-failed' : 'fold-hid-dispatch-failed',
-            },
+            details: { reason: 'fold-hid-dispatch-failed', deviceId: 'selected-duo' },
           });
       },
     );
-    expect(calls).toHaveLength(failure === 'build' || failure === 'cancel' ? 1 : 2);
-    expect(existsSync(path.dirname(binary))).toBe(false);
+    expect(dispatches).toEqual(
+      outcome === 'cancel'
+        ? []
+        : [['simctl', 'spawn', 'selected-duo', '/cache/fold-helper', 'half-open']],
+    );
   },
 );
 
@@ -58,12 +58,10 @@ test('streams all keyframes in one process with a duration-derived timeout', asy
   await withAppleToolProvider(
     createLocalAppleToolProvider({
       runCommand: async (_command, args, options) => {
-        if (args[0] === 'simctl') {
-          dispatches++;
-          expect(JSON.parse(args.at(-1)!)).toEqual(keyframes);
-          expect(options?.timeoutMs).toBe(70000);
-          expect(options?.kill).toEqual({ signal: 'SIGTERM', graceMs: 1000 });
-        }
+        dispatches++;
+        expect(JSON.parse(args.at(-1)!)).toEqual(keyframes);
+        expect(options?.timeoutMs).toBe(70000);
+        expect(options?.kill).toEqual({ signal: 'SIGTERM', graceMs: 1000 });
         return { stdout: '', stderr: '', exitCode: 0 };
       },
     }),
@@ -74,18 +72,16 @@ test('streams all keyframes in one process with a duration-derived timeout', asy
 
 test('HID dispatch addresses the UDID inside its scoped simulator set', async () => {
   const dispatches: string[][] = [];
-  let binary = '';
   await withAppleToolProvider(
     createLocalAppleToolProvider({
       runCommand: async (_command, args) => {
-        if (args.includes('clang')) binary = args.at(-1)!;
-        else dispatches.push(args);
+        dispatches.push([...args]);
         return { stdout: '', stderr: '', exitCode: 0 };
       },
     }),
     () => sendSimulatorFoldPose({ ...selectedDuo, simulatorSetPath: '/tmp/scoped-set' }, 'closed'),
   );
   expect(dispatches).toEqual([
-    ['simctl', '--set', '/tmp/scoped-set', 'spawn', 'selected-duo', binary, 'closed'],
+    ['simctl', '--set', '/tmp/scoped-set', 'spawn', 'selected-duo', '/cache/fold-helper', 'closed'],
   ]);
 });

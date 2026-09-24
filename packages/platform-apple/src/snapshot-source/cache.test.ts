@@ -5,7 +5,7 @@ import path from 'node:path';
 import { test } from 'vitest';
 import { isCommandTimeoutError } from '@agent-device/host-kit/command';
 import { createSnapshotSourceHost } from './host.ts';
-import { ensureSnapshotBridgeBinary } from './cache.ts';
+import { buildSnapshotBridgeCompileArgv, ensureSnapshotBridgeBinary } from './cache.ts';
 import { SnapshotSourceError } from './errors.ts';
 import { createSnapshotSourceDeadline } from './deadline.ts';
 import { DEFAULT_SNAPSHOT_SOURCE_LIMITS } from './limits.ts';
@@ -123,6 +123,15 @@ test('snapshot bridge preparation is cold-once, atomic, and invalidates corrupt 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('the runtime clang build never uses -Werror', () => {
+  const argv = buildSnapshotBridgeCompileArgv({
+    architecture: 'arm64',
+    sourceRoot: '',
+    outputPath: '',
+  });
+  assert.ok(!argv.includes('-Werror'));
 });
 
 test('concurrent snapshot bridge preparation publishes one cache entry', async () => {
