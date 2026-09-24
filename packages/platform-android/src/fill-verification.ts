@@ -43,44 +43,48 @@ type AndroidFillVerificationContext = {
   activeInputMethodPackage?: string | null;
 };
 
+/**
+ * The sampling rule that verifies a fill: a hierarchy sample every 150 ms until the typed text has
+ * held for two consecutive samples or the deadline has passed, and the sample taken at the deadline
+ * is the answer. The typed text reaches the accessibility tree when the app renders it, and a
+ * React Native controlled input on a loaded emulator renders it late.
+ */
+const FILL_VERIFICATION_SAMPLE_INTERVAL_MS = 150;
+const FILL_VERIFICATION_DEADLINE_MS = 1500;
+
+/** The clock the sampler paces itself by; a test hands in one it advances instead of waiting. */
+export type FillVerificationClock = Readonly<{
+  now(): number;
+  sleep(milliseconds: number): Promise<void>;
+}>;
+
+const wallClock: FillVerificationClock = Object.freeze({ now: () => Date.now(), sleep });
+
 export async function verifyAndroidFilledText(
   device: DeviceInfo,
   x: number,
   y: number,
   expected: string,
   helper: AndroidHelperSessionOptions = {},
+  clock: FillVerificationClock = wallClock,
 ): Promise<AndroidFillVerification> {
-  const verificationDelaysMs = [0, 150, 350];
-  let lastVerification: AndroidFillVerification | null = null;
-  let stableVerification: AndroidFillVerification | null = null;
   const context = await readAndroidFillVerificationContext(device);
+  const deadline = clock.now() + FILL_VERIFICATION_DEADLINE_MS;
+  let previous: AndroidFillVerification | null = null;
 
-  for (const delayMs of verificationDelaysMs) {
-    if (delayMs > 0) {
-      await sleep(delayMs);
-    }
+  for (;;) {
     const verification = await inspectAndroidFilledText(device, x, y, expected, context, helper);
-    lastVerification = verification;
     if (verification.reason === 'ime_capture') {
       return verification;
     }
-    if (verification.ok) {
-      stableVerification = verification;
-    } else {
-      stableVerification = null;
+    const remainingMs = deadline - clock.now();
+    if ((verification.ok && previous?.ok) || remainingMs <= 0) {
+      return verification;
     }
+    previous = verification;
+    // The last sleep ends at the deadline, so the final sample starts there and not an interval later.
+    await clock.sleep(Math.min(FILL_VERIFICATION_SAMPLE_INTERVAL_MS, remainingMs));
   }
-
-  return (
-    stableVerification ??
-    lastVerification ?? {
-      ok: false,
-      actual: null,
-      reason: 'text_mismatch',
-      targetInput: null,
-      actualInput: null,
-    }
-  );
 }
 
 export async function readAndroidTextAtPoint(
