@@ -43,6 +43,24 @@ export type RuntimeAdmissionRequest = RuntimeAdmissionBindings &
 export type { RuntimeAdmissionBindings };
 
 /**
+ * The one refusal the daemon reports when a device's exact runtime owner did not admit an
+ * operation. Both seams — this generic route and the request-scoped session handlers — build their
+ * `UNSUPPORTED_OPERATION` here, so the `<command> is not supported on this device` sentence, the
+ * typed `details.reason`, and the hint have a single owner and one wire shape.
+ */
+export function unsupportedOperationResponse(
+  command: string,
+  unavailable: RuntimeOperationUnavailability,
+): DaemonFailureResponse {
+  return errorResponse(
+    'UNSUPPORTED_OPERATION',
+    `${command} is not supported on this device`,
+    { reason: unavailable.reason },
+    unavailable.hint ? { hint: unavailable.hint } : undefined,
+  );
+}
+
+/**
  * The one facts-admission seam every migrated command route shares. It performs exactly one
  * side-effect-free inspection and hands back the binding gateway only once the exact device cell
  * admits every operation the caller's plan will invoke, so no route can dispatch first and
@@ -57,12 +75,7 @@ export async function admitRuntimeOperations(
     if (fact.available) continue;
     const response = request.unavailableResponse
       ? request.unavailableResponse(fact)
-      : errorResponse(
-          'UNSUPPORTED_OPERATION',
-          `${request.command} is not supported on this device`,
-          undefined,
-          fact.hint ? { hint: fact.hint } : undefined,
-        );
+      : unsupportedOperationResponse(request.command, fact);
     return { type: 'response', response };
   }
   return { type: 'admitted', bind: requireDeviceBinding(request.bindDevice) };
