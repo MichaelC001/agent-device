@@ -40,7 +40,7 @@ extension RunnerTests {
           truncated: 0,
           blocked: false
         ),
-        viewport: .infinite
+        viewport: .reported(box: CGRect(x: 0, y: 0, width: 100, height: 100))
       ),
       options: PresentationOptions(
         interactiveOnly: true,
@@ -113,7 +113,7 @@ extension RunnerTests {
             projection: .regular, depth: nil, regularPresentedDepth: nil,
             interactiveOnly: false, customActions: false),
           nodes: acquired, truncated: false, effectiveDepth: nil,
-          viewport: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)),
+          viewport: .reported(box: CGRect(x: 0, y: 0, width: 1_000, height: 1_000))),
         options: PresentationOptions(interactiveOnly: false, depth: nil, scope: nil, raw: false)
       ).nodes
     )
@@ -124,7 +124,7 @@ extension RunnerTests {
             projection: .regular, depth: nil, regularPresentedDepth: nil,
             interactiveOnly: true, customActions: false),
           nodes: acquired, truncated: false, effectiveDepth: nil,
-          viewport: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)),
+          viewport: .reported(box: CGRect(x: 0, y: 0, width: 1_000, height: 1_000))),
         options: PresentationOptions(interactiveOnly: true, depth: nil, scope: nil, raw: false)
       ).nodes
     )
@@ -147,7 +147,8 @@ extension RunnerTests {
           hint: CaptureHint(
             projection: .raw, depth: nil, regularPresentedDepth: nil,
             interactiveOnly: false, customActions: false),
-          nodes: acquired, truncated: false, effectiveDepth: nil, viewport: .infinite),
+          nodes: acquired, truncated: false, effectiveDepth: nil,
+          viewport: .reported(box: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)) ),
         options: PresentationOptions(interactiveOnly: true, depth: nil, scope: nil, raw: true)
       ).nodes
     )
@@ -176,7 +177,7 @@ extension RunnerTests {
       nodes: nodes,
       truncated: false,
       effectiveDepth: nil,
-      viewport: CGRect(x: 0, y: 0, width: 100, height: 100)
+      viewport: .reported(box: CGRect(x: 0, y: 0, width: 100, height: 100))
     )
 
     let presented = try SnapshotPresentation.presentRegular(
@@ -211,7 +212,7 @@ extension RunnerTests {
           nodes: acquired,
           truncated: false,
           effectiveDepth: nil,
-          viewport: viewport
+          viewport: .reported(box: viewport)
         ),
         options: regularOptions
       ).nodes
@@ -231,7 +232,7 @@ extension RunnerTests {
           nodes: acquired,
           truncated: false,
           effectiveDepth: nil,
-          viewport: .infinite
+          viewport: .reported(box: CGRect(x: 0, y: 0, width: 100, height: 100))
         ),
         options: rawOptions
       ).nodes
@@ -286,7 +287,7 @@ extension RunnerTests {
       ],
       truncated: false,
       effectiveDepth: nil,
-      viewport: CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+      viewport: .reported(box: CGRect(x: 0, y: 0, width: 1_000, height: 1_000))
     )
     let options = PresentationOptions(
       interactiveOnly: true,
@@ -313,7 +314,7 @@ extension RunnerTests {
           nodes: acquisition.nodes,
           truncated: false,
           effectiveDepth: nil,
-          viewport: .infinite
+          viewport: .reported(box: CGRect(x: 0, y: 0, width: 100, height: 100))
         ),
         options: PresentationOptions(
           interactiveOnly: true,
@@ -374,10 +375,11 @@ extension RunnerTests {
     let regularAcquisition = SnapshotAcquisition(
       hint: SnapshotPresentation.captureHint(for: regularRequest),
       nodes: nodes, truncated: false, effectiveDepth: nil,
-      viewport: CGRect(x: 0, y: 0, width: 100, height: 100))
+      viewport: .reported(box: CGRect(x: 0, y: 0, width: 100, height: 100)))
     let rawAcquisition = SnapshotAcquisition(
       hint: SnapshotPresentation.captureHint(for: rawRequest),
-      nodes: nodes, truncated: false, effectiveDepth: nil, viewport: .infinite)
+      nodes: nodes, truncated: false, effectiveDepth: nil,
+      viewport: .reported(box: CGRect(x: 0, y: 0, width: 100, height: 100)))
 
     let regularCaptureForRawRequest = try SnapshotPresentation.present(
       regularAcquisition, options: rawRequest)
@@ -470,7 +472,7 @@ extension RunnerTests {
           ],
           truncated: false,
           effectiveDepth: nil,
-          viewport: CGRect(x: 0, y: 0, width: 100, height: 100)
+          viewport: .reported(box: CGRect(x: 0, y: 0, width: 100, height: 100))
         ),
         options: options
       )
@@ -552,7 +554,7 @@ extension RunnerTests {
       nodes: nodes,
       truncated: false,
       effectiveDepth: nil,
-      viewport: viewport
+      viewport: .reported(box: viewport)
     )
     let presented = try XCTUnwrap(
       SnapshotPresentation.present(acquisition, options: options)?.nodes)
@@ -596,8 +598,10 @@ extension RunnerTests {
     ]
     let normalized = SnapshotGeometrySpace.normalized(
       nodes: acquired,
-      viewport: viewport,
-      interfaceOrientation: RunnerInterfaceOrientation.landscapeRight
+      viewport: .reported(
+        box: viewport,
+        interfaceOrientation: RunnerInterfaceOrientation.landscapeRight
+      )
     )
     let options = PresentationOptions(interactiveOnly: false, depth: 3, scope: nil, raw: false)
     let hint = SnapshotPresentation.captureHint(for: options)
@@ -608,7 +612,7 @@ extension RunnerTests {
           nodes: normalized,
           truncated: false,
           effectiveDepth: nil,
-          viewport: viewport
+          viewport: .reported(box: viewport)
         ),
         options: options
       )?.nodes

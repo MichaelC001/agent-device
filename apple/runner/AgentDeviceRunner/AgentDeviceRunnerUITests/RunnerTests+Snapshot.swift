@@ -21,9 +21,8 @@ extension RunnerTests {
   struct SnapshotTraversalContext {
     let queryRoot: XCUIElement
     let rootSnapshot: XCUIElementSnapshot
-    let viewport: CGRect
-    /** Which way the app's interface is turned from the device's native space (#2612). */
-    let interfaceOrientation: Int
+    /** Carries which way the app's interface is turned from the device's native space (#2612). */
+    let viewport: SnapshotViewport
     /**
      * The keyboard band this capture measured, published beside the tree so the daemon's tap guard
      * measures against the producer's own reading rather than a band it derives from these rects
@@ -278,8 +277,7 @@ extension RunnerTests {
       nodes: nodes,
       truncated: false,
       effectiveDepth: nil,
-      viewport: context.viewport,
-      interfaceOrientation: context.interfaceOrientation
+      viewport: context.viewport
     )
   }
 
@@ -435,8 +433,7 @@ extension RunnerTests {
       nodes: nodes,
       truncated: false,
       effectiveDepth: nil,
-      viewport: context.viewport,
-      interfaceOrientation: context.interfaceOrientation
+      viewport: context.viewport
     )
   }
 
@@ -455,14 +452,13 @@ extension RunnerTests {
           nodes: nodes,
           truncated: false,
           effectiveDepth: nil,
-          viewport: .infinite,
-          interfaceOrientation: RunnerInterfaceOrientation.unknown
+          viewport: .missing(reason: .notProvided)
         ),
         .completed
       )
     }
 
-    let viewport = safeSnapshotViewport(app: app)
+    let viewport = safeSnapshotViewport(app: app, readingOrientation: false)
     var seen = Set<String>()
     var candidates: [RawAXNode] = []
     let flatElements = flatInteractiveElements(app: app, deadline: deadline)
@@ -492,11 +488,9 @@ extension RunnerTests {
     }
 
     // The synthetic root doubles as the daemon's viewport (find.ts prefers on-screen matches
-    // inside nodes[0].rect): use the real screen viewport when capture produced a finite one,
-    // so off-screen candidates can never inflate the root and masquerade as on-screen.
-    let rootRect = viewport.isInfinite || viewport.isNull || viewport.isEmpty
-      ? interactiveRootFrame(for: candidates)
-      : viewport
+    // inside nodes[0].rect): use the real screen viewport when the capture resolved one, so
+    // off-screen candidates can never inflate the root and masquerade as on-screen.
+    let rootRect = viewport.rect ?? interactiveRootFrame(for: candidates)
     nodes[0] = interactiveRootNode(rect: rootRect)
     for candidate in candidates {
       nodes.append(
@@ -524,8 +518,7 @@ extension RunnerTests {
         nodes: nodes,
         truncated: outcome == .deadlineExhausted,
         effectiveDepth: nil,
-        viewport: viewport,
-        interfaceOrientation: RunnerInterfaceOrientation.unknown
+        viewport: viewport
       ),
       outcome
     )

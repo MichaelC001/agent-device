@@ -304,6 +304,16 @@ a typed `IOS_SNAPSHOT_PRESENTATION_FAILED` capture failure with the named `prese
 snapshot-quality reason, preserved through recovery and the existing TypeScript verdict/warning
 contract.
 
+Inside the runner the viewport is a declared fact, not a rectangle: `SnapshotViewport` is
+`reported(box, interfaceOrientation)`, `derived(box)`, or `missing(reason)`, the cases of the host's
+`IosViewportEvidence` (#2891). Only `reported` carries an orientation, so only it can anchor a
+rotation in `SnapshotGeometrySpace`. With no box the clip skips, the cumulative-clip invariant has no
+root clip to violate, and a node whose actionability depends on containment has no `hittable` on the
+wire, as on the host bridge; disabled or degenerate nodes stay declared `false`. The runner route's
+host evidence comes from the payload's root nodes (`resolveIosViewportEvidenceFromRoots` in
+`packages/capture-kit/src/ios-snapshot-acquisition.ts`). `contracts/fixtures/snapshot-actionability-policy.json`
+pins the predicate for shapes the 320x240 fold fixture cannot reach.
+
 A regular `--depth` request is a presentation cut, not an acquisition bound. `CaptureHint` keeps raw
 traversal depth (`--raw --depth`) separate from regular presented depth, but the recursive tree walk
 no longer reads presented depth (or any geometry) while descending: for a regular capture it

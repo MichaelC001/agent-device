@@ -1,5 +1,6 @@
 import type { Rect } from './snapshot.ts';
 
+/** Twin of `SnapshotGeometry.isPositiveFinite` on the runner (#2891). */
 export function isPositiveFiniteRect(rect: Rect | undefined): rect is Rect {
   return Boolean(
     rect &&
@@ -29,13 +30,12 @@ export function containsPoint(rect: Rect, x: number, y: number): boolean {
 
 /**
  * The shared `hittable` predicate every iOS snapshot producer publishes (#1933): an enabled node
- * with a positive frame whose center falls inside the viewport. It is the TypeScript twin of the
- * runner's Swift `SnapshotGeometry.isGeometricallyActionable`, including `CGRect.contains`'s
- * half-open right/bottom edges — a center landing exactly on the viewport's right or bottom edge is
- * not hittable on either producer. The host AX bridge derives the source bit from the node's own
- * frame and the fold intersects it with the clipped frame, so a `hittable:` selector cannot tell the
- * two producers apart. Kept here so both packages read one definition rather than each re-encoding
- * the rule.
+ * with a positive finite frame whose center falls inside the viewport. It is the TypeScript twin of
+ * the runner's Swift `SnapshotGeometry.isGeometricallyActionable`, including `CGRect.contains`'s
+ * half-open right/bottom edges; `contracts/fixtures/snapshot-actionability-policy.json` pins both.
+ * Callers without a viewport box withhold the bit instead of asking. The host AX bridge derives the
+ * source bit from the node's own frame and the fold intersects it with the clipped frame, so a
+ * `hittable:` selector cannot tell the two producers apart.
  */
 export function isGeometricallyActionable(
   enabled: boolean,

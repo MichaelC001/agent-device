@@ -100,7 +100,7 @@ public enum SnapshotVisibilityFold {
   public static func traversalDecision(
     for node: RawAXNode,
     parent: TraversalState,
-    viewport: CGRect,
+    viewport: SnapshotViewport,
     interactiveOnly: Bool,
     hasChildren: Bool,
     policy: Policy
@@ -153,7 +153,7 @@ public enum SnapshotVisibilityFold {
 
   public static func fold(
     _ nodes: [RawAXNode],
-    viewport: CGRect,
+    viewport: SnapshotViewport,
     interactiveOnly: Bool,
     policy: Policy
   ) -> [SnapshotPresentationNode] {
@@ -203,12 +203,17 @@ public enum SnapshotVisibilityFold {
               enabled: node.enabled,
               focused: node.focused,
               selected: node.selected,
-              hittable: node.parentIndex != nil && node.hittable
-                && SnapshotGeometry.isGeometricallyActionable(
-                  enabled: node.enabled,
-                  frame: decision.effectiveFrame,
-                  viewport: viewport
-                ),
+              hittable: node.parentIndex == nil
+                ? false
+                : node.hittable.flatMap { sourceHittable in
+                  sourceHittable
+                    ? SnapshotGeometry.isGeometricallyActionable(
+                      enabled: node.enabled,
+                      frame: decision.effectiveFrame,
+                      viewport: viewport
+                    )
+                    : false
+                },
               depth: outDepth,
               parentIndex: keptIndex,
               hiddenContentAbove: node.hiddenContentAbove,

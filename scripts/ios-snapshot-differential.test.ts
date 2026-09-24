@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { test } from 'node:test';
 import fc from 'fast-check';
+import { isGeometricallyActionable, isPositiveFiniteRect } from '@agent-device/kernel/rect';
+import type { Rect } from '@agent-device/kernel/snapshot';
 import {
   compareDifferentialCases,
   swiftToolchainAvailable,
@@ -124,3 +128,107 @@ function assertWithinKillCriterion(startedAt: number, seed: number): void {
       String(seed),
   );
 }
+
+type ActionabilityRect = Readonly<{ x: number; y: number; width: number; height: number }>;
+type ActionabilityUnusableRect = Readonly<{ infinite: true }> | Readonly<{ nonFinite: true }>;
+type ActionabilityViewport =
+  | Readonly<{ kind: 'reported' | 'derived'; rect: ActionabilityRect }>
+  | Readonly<{ kind: 'missing'; reason: 'not-provided' | 'invalid' }>;
+type ActionabilityVector = Readonly<{
+  name: string;
+  swift: boolean;
+  typescript: boolean;
+  asymmetry?: string;
+  enabled: boolean;
+  node: ActionabilityRect | ActionabilityUnusableRect;
+  viewport: ActionabilityViewport;
+  /** `null` is the absent bit. */
+  hittable: boolean | null;
+  nodeRectGuardPasses: boolean;
+}>;
+
+const ACTIONABILITY_POLICY_PATH = path.resolve(
+  import.meta.dirname,
+  '..',
+  'contracts',
+  'fixtures',
+  'snapshot-actionability-policy.json',
+);
+
+/** A box whose components are not numbers anything may plot. JSON has no literal for infinity. */
+const NON_FINITE_RECT: Rect = {
+  x: Number.NEGATIVE_INFINITY,
+  y: Number.NEGATIVE_INFINITY,
+  width: Number.POSITIVE_INFINITY,
+  height: Number.POSITIVE_INFINITY,
+};
+
+function declaresItsAsymmetry(vector: ActionabilityVector): boolean {
+  const hasReason = typeof vector.asymmetry === 'string' && vector.asymmetry.length > 0;
+  return (vector.swift && vector.typescript) !== hasReason;
+}
+
+function readActionabilityVectors(): readonly ActionabilityVector[] {
+  const table = JSON.parse(fs.readFileSync(ACTIONABILITY_POLICY_PATH, 'utf8')) as {
+    cases: readonly ActionabilityVector[];
+  };
+  assert.ok(table.cases.length > 0, 'actionability vector table must not be empty');
+  assert.equal(
+    new Set(table.cases.map((vector) => vector.name)).size,
+    table.cases.length,
+    'actionability vector names must be unique',
+  );
+  for (const vector of table.cases) {
+    assert.equal(typeof vector.swift, 'boolean', `${vector.name}: row must declare the Swift side`);
+    assert.equal(
+      typeof vector.typescript,
+      'boolean',
+      `${vector.name}: row must declare the TypeScript side`,
+    );
+    assert.ok(
+      declaresItsAsymmetry(vector),
+      `${vector.name}: a row both languages do not share must name the asymmetry`,
+    );
+  }
+  return table.cases;
+}
+
+function toRect(node: ActionabilityVector['node']): Rect {
+  if ('nonFinite' in node) return NON_FINITE_RECT;
+  if ('infinite' in node) {
+    throw new Error(
+      "CGRect.infinite is Apple's value and no row reaching TypeScript may stand for it: " +
+        'that row belongs to the Swift side alone',
+    );
+  }
+  return node;
+}
+
+// The Swift twin of these rows is ActionabilityPolicyTests, run by `swift test --package-path
+// apple/snapshot-presentation` in this same command.
+test('the shared hittable predicate agrees with every golden actionability vector', () => {
+  for (const vector of readActionabilityVectors().filter((row) => row.typescript)) {
+    const node = toRect(vector.node);
+    assert.equal(
+      isPositiveFiniteRect(node),
+      vector.nodeRectGuardPasses,
+      `${vector.name}: node-rect guard`,
+    );
+    if (vector.viewport.kind === 'missing') {
+      throw new Error(`${vector.name}: the TypeScript predicate takes a box`);
+    }
+    assert.equal(
+      isGeometricallyActionable(vector.enabled, node, vector.viewport.rect),
+      vector.hittable,
+      vector.name,
+    );
+  }
+});
+
+test('the TypeScript rows cover every viewport kind that carries a box', () => {
+  const vectors = readActionabilityVectors().filter((row) => row.typescript);
+  assert.deepEqual([...new Set(vectors.map((vector) => vector.viewport.kind))].sort(), [
+    'derived',
+    'reported',
+  ]);
+});
