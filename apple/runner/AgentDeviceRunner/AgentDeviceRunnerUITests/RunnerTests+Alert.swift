@@ -161,21 +161,25 @@ extension RunnerTests {
     elements.first { isVisibleElement($0) }
   }
 
+  /// The marker is matched inside XCTest's query, so the screen is read once per query. Reading each
+  /// descendant instead costs one round trip per element, and on a screen whose tree changes while
+  /// it is read (a loading web view) each vanished element adds XCTest's retry cycle. `containing`
+  /// also matches a window that is itself the marker.
   private func firstDismissPopupWindow(in app: XCUIApplication) -> XCUIElement? {
-    safeElementsQuery {
-      app.windows.allElementsBoundByIndex
-    }.first { window in
-      if !isVisibleElement(window) { return false }
-      if isDismissPopupMarker(window.label) || isDismissPopupMarker(window.identifier) {
-        return true
-      }
-      return safeElementsQuery {
-        window.descendants(matching: .any).allElementsBoundByIndex
-      }.contains { descendant in
-        isDismissPopupMarker(descendant.label) || isDismissPopupMarker(descendant.identifier)
-      }
-    }
+    firstExistingElement(in: safeElementsQuery {
+      app.windows.containing(Self.dismissPopupMarker).allElementsBoundByIndex
+    })
   }
+
+  /// The one definition of a popover's dismiss region: a label or identifier that reads "dismiss
+  /// popup", in any case, with any surrounding whitespace. XCTest queries take it as a format predicate.
+  private static let dismissPopupMarkerPattern = #"\s*dismiss popup\s*"#
+  private static let dismissPopupMarker = NSPredicate(
+    format: "label MATCHES[c] %@ OR identifier MATCHES[c] %@",
+    dismissPopupMarkerPattern,
+    dismissPopupMarkerPattern
+  )
+  private static let dismissPopupMarkerText = NSPredicate(format: "SELF MATCHES[c] %@", dismissPopupMarkerPattern)
 
   private func chooseAlertButton(_ buttons: [XCUIElement], action: String) -> XCUIElement? {
     if action == "accept" {
@@ -285,7 +289,7 @@ extension RunnerTests {
     return hittable
   }
 
-  private func isDismissPopupMarker(_ label: String) -> Bool {
-    label.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("dismiss popup") == .orderedSame
+  func isDismissPopupMarker(_ text: String) -> Bool {
+    Self.dismissPopupMarkerText.evaluate(with: text)
   }
 }
