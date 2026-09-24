@@ -301,13 +301,14 @@ XCTest-coordinate fallback rules stay runner-local in
 `RunnerTests+SynthesizedGesturePolicy.swift`. That Swift policy is the source of
 truth because the current table has only three behaviors:
 
-- coordinate synthesized tap never probes keyboards and may use the coordinate
-  fallback;
+- coordinate synthesized tap, standalone, as a `sequence` step, or as the
+  in-app `back` top-leading tap, never probes keyboards and may use the
+  coordinate fallback;
 - default iOS scroll probes keyboards only after AX is known healthy and must
   not fall back to `XCUICoordinate`;
-- synthesized one-contact `gesture` plans and synthesized sequence tap steps may
-  still use the coordinate fallback before AX health is known, but stop using it
-  once a snapshot stamps AX unavailable.
+- synthesized one-contact `gesture` plans may still use the coordinate fallback
+  before AX health is known, but stop using it once a snapshot stamps AX
+  unavailable.
 
 The non-obvious parts are covered by gated XCTest policy tests instead of a
 cross-language mirror. A future sibling registry should only be introduced once

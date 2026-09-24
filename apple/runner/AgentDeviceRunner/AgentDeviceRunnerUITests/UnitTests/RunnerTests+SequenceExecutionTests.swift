@@ -57,20 +57,6 @@ extension RunnerTests {
     XCTAssertTrue(response.error?.message.contains("at most 20") ?? false)
   }
 
-  func testSequenceHasSynthesizedCoordinateStep() {
-    XCTAssertTrue(
-      sequenceHasSynthesizedCoordinateStep([
-        sequenceStep(kind: "tap", x: 1, y: 2, synthesized: true),
-      ])
-    )
-    XCTAssertFalse(
-      sequenceHasSynthesizedCoordinateStep([
-        sequenceStep(kind: "tap", x: 1, y: 2),
-        sequenceStep(kind: "doubleTap", x: 1, y: 2, synthesized: true),
-      ])
-    )
-  }
-
   func testAssembleSequencePreservesOrderOnSuccess() {
     let steps = [
       sequenceStep(kind: "tap", x: 1, y: 1),
@@ -151,8 +137,7 @@ extension RunnerTests {
   private func sequenceStep(
     kind: String,
     x: Double?,
-    y: Double? = nil,
-    synthesized: Bool? = nil
+    y: Double? = nil
   ) -> SequenceStep {
     SequenceStep(
       kind: kind,
@@ -160,7 +145,7 @@ extension RunnerTests {
       y: y,
       durationMs: nil,
       pauseMs: nil,
-      synthesized: synthesized
+      synthesized: nil
     )
   }
 
@@ -181,6 +166,35 @@ extension RunnerTests {
     }
     let data = try! JSONEncoder().encode(SequenceCommandFixture(steps: steps))
     return try! JSONDecoder().decode(Command.self, from: data)
+  }
+}
+#endif
+
+#if AGENT_DEVICE_RUNNER_UNIT_TESTS && os(iOS)
+extension RunnerTests {
+  func testSynthesizedSequenceTapFallsBackToXCTestCoordinateTapWhenAccessibilityIsUnavailable() throws {
+    let restoreSynthesizedTap = try forceSynthesizedTapFailure()
+    app.launch()
+    currentApp = app
+    defer {
+      restoreSynthesizedTap()
+      invalidateCachedTarget(reason: "unit_test_cleanup")
+      app.terminate()
+    }
+    let label = app.staticTexts["Agent Device Runner"]
+    XCTAssertTrue(label.waitForExistence(timeout: appExistenceTimeout))
+    let point = CGPoint(x: label.frame.midX, y: label.frame.midY)
+    runnerAccessibilityHealth = .unavailable
+    let command = try runnerCommandFixture(
+      #"{"command":"sequence","commandId":"sequence-synthesized-tap-fallback","steps":[{"kind":"tap","x":\#(point.x),"y":\#(point.y),"synthesized":true}]}"#
+    )
+
+    let response = try executeOnMainPrepared(command: command, activeApp: app)
+
+    XCTAssertTrue(response.ok)
+    XCTAssertEqual(response.data?.completedSteps, 1)
+    XCTAssertNil(response.data?.failedStepIndex)
+    XCTAssertEqual(response.data?.sequenceResults?.first?.ok, true)
   }
 }
 #endif
