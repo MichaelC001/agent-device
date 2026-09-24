@@ -3,8 +3,9 @@
  * The daemon renders it; it never re-derives degradation from node shapes.
  *
  * Defined here (the foundational snapshot type module) rather than in
- * snapshot-quality/verdict.ts so SnapshotNode can reference it without a cyclic import;
- * snapshot-quality/verdict.ts owns the validation logic.
+ * capture-kit's snapshot-quality-verdict.ts so SnapshotNode can reference it without a cyclic
+ * import. Ownership splits three ways: this module owns the vocabularies below, capture-kit parses
+ * an untrusted runner payload into them, and contracts re-hydrates a verdict this repo published.
  */
 /**
  * Which capture STRATEGY produced a snapshot, within one platform's plan —
@@ -23,8 +24,21 @@ export type SnapshotQualityTiming = {
   presentationMs: number;
 };
 
+/**
+ * The verdict states a capture plan may stamp. This tuple is the ONE declaration of that
+ * vocabulary, and `SnapshotQualityVerdict['state']` is its projection; readers hold exhaustive maps
+ * over the union instead of importing this module, because the eager-closure gate freezes their
+ * loading shape (#2872). This tuple and the Apple runner's `SnapshotQualityState.allCases` are each
+ * pinned as a set to `contracts/fixtures/ios-snapshot-quality-states.json`, so a state one side
+ * renames, adds, or deletes without the other goes red there instead of arriving as a verdict the
+ * host cannot name — which reads as verdict-absent and drops the disclosure with it.
+ */
+export const SNAPSHOT_QUALITY_STATES = ['healthy', 'recovered', 'sparse'] as const;
+
+export type SnapshotQualityState = (typeof SNAPSHOT_QUALITY_STATES)[number];
+
 export type SnapshotQualityVerdict = {
-  state: 'healthy' | 'recovered' | 'sparse';
+  state: SnapshotQualityState;
   backend: SnapshotCaptureBackend;
   reason?: string;
   // 'deferred' = the penalty circuit breaker pre-selected a non-XCTest backend; nothing new
