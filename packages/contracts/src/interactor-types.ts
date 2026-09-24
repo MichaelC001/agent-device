@@ -175,6 +175,12 @@ export type SnapshotOptions = BaseSnapshotOptions & {
   surface?: SessionSurface;
   /** Internal capture purpose; action outcomes always require the full tree. */
   acquisitionIntent?: 'full' | 'surface-observation';
+  /**
+   * A one-off read, such as an open's launch observation. It may use a capture host the session
+   * already keeps warm, but it never installs one or leaves running one that it started. It starts
+   * no re-capture after `settleBy` (epoch ms); only `signal` cancels work already started.
+   */
+  transient?: Readonly<{ settleBy: number }>;
 };
 
 /**
