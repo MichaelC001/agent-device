@@ -151,6 +151,25 @@ jobs:
             --report-junit
             test/artifacts/replays-macos.junit.xml
 
+      # Clean-install verification may raise macOS local-network permission UI; keep it after replay.
+      - name: Select Apple bridge proof
+        if: github.event_name == 'pull_request'
+        id: bridge-impact
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch origin "$BASE_SHA" --depth=1 || echo 'Base fetch failed; bridge proof selection will fail open.'
+          node --experimental-strip-types scripts/apple-ci-impact.ts bridge
+
+      - name: Verify clean-installed Simulator snapshot bridge preparation and the fold-helper -Werror gate
+        if: github.event_name == 'pull_request' && steps.bridge-impact.outputs.run != 'false'
+        run: |
+          pnpm build
+          pnpm exec vitest run \
+            packages/platform-apple/src/snapshot-source/native-runtime.test.ts \
+            packages/platform-apple/src/foldable/fold-helper-cache.test.ts
+          pnpm check:package -- --verify-snapshot-bridge-preparation
+
       - name: Upload macOS artifacts
         if: always()
         uses: ./.github/actions/upload-agent-device-artifacts
