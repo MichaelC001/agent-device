@@ -40,9 +40,11 @@
 //     directly (R77) — the subtree sits in the eager closure of seven Apple façade entries the
 //     eager-closure-budgets gate holds at a fixed size, so a direct host-kit edge grows all seven;
 //     host-kit reaches the runner only through `runner/host.ts`, bound in `core/runner-host.ts`.
-//   - Over SIMCTL ARGV in production source: only `core/simctl.ts` (and the provider executors in
-//     `core/tool-provider.ts`) build, prefix or mint scoped simctl argv, and only the calls that
-//     name no device take set scope (R79), so a udid never runs outside the set that holds it.
+//   - Over SIMCTL ARGV in production source: `tsc` holds `runXcrun` and the Apple tool port to
+//     branded simctl argv. The plain executors take any string argv, so R79 refuses every array
+//     that names simctl first outside `core/simctl.ts` and `core/tool-provider.ts`, however it
+//     reaches an executor, holds an inline xcrun argv to a literal non-simctl tool name, and keeps
+//     brand casts inside those two modules, so a udid never runs outside the set that holds it.
 //   - Over REQUEST-BOUND RUNTIME EXECUTION: facts remain the only admission authority and daemon
 //     code cannot manufacture or repair a narrowed runtime proof (R66).
 //   - Over CONTRACTS PRODUCTION SOURCE: contracts owns vocabulary only — host, process, and timer
