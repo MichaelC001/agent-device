@@ -57,6 +57,35 @@ struct SnapshotPhaseTimer {
   }
 }
 
+/// Keeps the first capture plan that runs against a fresh target process from penalizing the XCTest
+/// channel for a slow tier. Lifecycle code arms and disarms it on main; the capture plan consumes it
+/// on the command queue, so a snapshot that returns before running a plan leaves it pending.
+final class SnapshotXCTestPenaltyWarmupExemption {
+  private let lock = NSLock()
+  private var pending = false
+
+  var isPending: Bool {
+    get {
+      lock.lock()
+      defer { lock.unlock() }
+      return pending
+    }
+    set {
+      lock.lock()
+      pending = newValue
+      lock.unlock()
+    }
+  }
+
+  func consume() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    let wasPending = pending
+    pending = false
+    return wasPending
+  }
+}
+
 extension RunnerTests {
   struct SnapshotBackendAttempt {
     enum Outcome {
@@ -69,6 +98,20 @@ extension RunnerTests {
     /// or error text.
     let outcome: Outcome
     let timing: SnapshotCaptureTiming
+    /// Whether the tier finished collecting or stopped at its own deadline. A tier that stopped at
+    /// its deadline timed out even when it handed back a payload, so penalty and recovery policy
+    /// read this instead of classifying the payload (#2781).
+    let tierOutcome: SnapshotTierOutcome
+
+    init(
+      outcome: Outcome,
+      timing: SnapshotCaptureTiming,
+      tierOutcome: SnapshotTierOutcome = .completed
+    ) {
+      self.outcome = outcome
+      self.timing = timing
+      self.tierOutcome = tierOutcome
+    }
   }
 
   /// The penalty breaker observes only acquisition facts. Presentation is a separate phase and
@@ -84,6 +127,9 @@ extension RunnerTests {
     {
       return "\(kind.rawValue)_backend_timeout"
     }
+    if attempt.tierOutcome == .deadlineExhausted {
+      return "\(kind.rawValue)_backend_timeout"
+    }
     guard attempt.timing.acquisitionMs > slowThresholdMs else { return nil }
     return "slow_\(kind.rawValue)_capture_\(Int(attempt.timing.acquisitionMs))ms"
   }
@@ -91,6 +137,7 @@ extension RunnerTests {
   func recordXCTestSnapshotBackendAttemptIfNeeded(
     _ kind: SnapshotBackendKind,
     attempt: SnapshotBackendAttempt,
+    bundleId: String?,
     penaltySuppressed: Bool
   ) {
     guard !penaltySuppressed else { return }
@@ -102,7 +149,7 @@ extension RunnerTests {
       )
     else { return }
     penalizeSnapshotXCTestChannel(
-      bundleId: currentBundleId,
+      bundleId: bundleId,
       reason: reason
     )
   }

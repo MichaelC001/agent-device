@@ -37,6 +37,16 @@ enum SnapshotXCTestChannelPlanState: Equatable {
   case boundedXCTestProbe
 }
 
+/// How one tier's bounded work ended. `deadlineExhausted` is a tier timeout: the tier stopped
+/// starting work it could not finish inside its own slice, so what it returns is a partial result
+/// it never completed collecting. The plan keeps that result only as the fallback and lets the next
+/// backend answer; a node count cannot tell the two apart, because a short sweep still collects
+/// more than the sparse threshold (#2781).
+enum SnapshotTierOutcome: Equatable {
+  case completed
+  case deadlineExhausted
+}
+
 struct EffectiveSnapshotCapturePlan {
   let plan: [SnapshotBackendKind]
   let xCTestChannelState: SnapshotXCTestChannelPlanState
@@ -140,12 +150,6 @@ extension RunnerTests {
     // A penalty recorded without a bundle id applies to whatever target is current.
     guard let penalized = snapshotXCTestChannelPenaltyBundleId else { return true }
     return penalized == bundleId
-  }
-
-  func consumeSnapshotXCTestPenaltyWarmupExemption() -> Bool {
-    let pending = snapshotXCTestPenaltyWarmupExemptionPending
-    snapshotXCTestPenaltyWarmupExemptionPending = false
-    return pending
   }
 
   /// The pre-seeded first-failure a penalized plan stamps into its verdict. The deferred case
@@ -260,7 +264,7 @@ extension RunnerTests {
 
   func runSnapshotCapturePlan(
     _ plan: [SnapshotBackendKind],
-    app: XCUIApplication,
+    target: SnapshotCaptureTarget,
     options: PresentationOptions,
     terminal: SnapshotCaptureTerminalPolicy,
     deadline: Date? = nil
@@ -270,7 +274,7 @@ extension RunnerTests {
     var axFailure: SnapshotCaptureFailure?
     // A caller may share the pre-plan system-modal probe's deadline; otherwise own the full budget (#1244).
     let deadline = deadline ?? Date().addingTimeInterval(Self.snapshotPlanBudget)
-    let suppressXCTestPenalty = consumeSnapshotXCTestPenaltyWarmupExemption()
+    let suppressXCTestPenalty = snapshotXCTestPenaltyWarmupExemption.consume()
 
     // Reorder is iOS-only because hostile screens can make XCTest tree/query work grind while
     // the app remains visually responsive. Simulators can avoid that channel through private AX;
@@ -281,7 +285,7 @@ extension RunnerTests {
     var xCTestChannelPenalized = false
     var xCTestChannelPenalizedByBreaker = false
 #if os(iOS)
-    xCTestChannelPenalizedByBreaker = isSnapshotXCTestChannelPenalized(bundleId: currentBundleId)
+    xCTestChannelPenalizedByBreaker = isSnapshotXCTestChannelPenalized(bundleId: target.bundleId)
     xCTestChannelPenalized = Self.snapshotXCTestChannelTreatedAsPenalized(
       penalized: xCTestChannelPenalizedByBreaker,
       preferredBackend: options.preferredBackend
@@ -305,9 +309,9 @@ extension RunnerTests {
     case .normal:
       break
     case .deferredToIndependentBackend:
-      NSLog("AGENT_DEVICE_RUNNER_SNAPSHOT_XCTEST_CHANNEL_DEFERRED bundle=%@", currentBundleId ?? "")
+      NSLog("AGENT_DEVICE_RUNNER_SNAPSHOT_XCTEST_CHANNEL_DEFERRED bundle=%@", target.bundleId ?? "")
     case .boundedXCTestProbe:
-      NSLog("AGENT_DEVICE_RUNNER_SNAPSHOT_XCTEST_CHANNEL_PROBE_BOUNDED bundle=%@", currentBundleId ?? "")
+      NSLog("AGENT_DEVICE_RUNNER_SNAPSHOT_XCTEST_CHANNEL_PROBE_BOUNDED bundle=%@", target.bundleId ?? "")
     }
 
     for kind in effectivePlan {
@@ -332,7 +336,7 @@ extension RunnerTests {
       }
       let attempt = try captureWithBackend(
         kind,
-        app: app,
+        target: target,
         options: options,
         deadline: deadline,
         treeCaptureSliceBudgetOverride: effective.treeCaptureSliceBudgetOverride
@@ -340,6 +344,7 @@ extension RunnerTests {
       recordXCTestSnapshotBackendAttemptIfNeeded(
         kind,
         attempt: attempt,
+        bundleId: target.bundleId,
         penaltySuppressed: suppressXCTestPenalty
       )
       if case let .failed(failure, phase: _) = attempt.outcome {
@@ -356,8 +361,19 @@ extension RunnerTests {
       }
       guard case let .captured(capture) = attempt.outcome else { continue }
 
-      if let sparseReason = Self.sparsePayloadReason(capture.qualityPayload ?? capture.payload) {
-        if firstFailure == nil { firstFailure = sparseReason }
+      if attempt.tierOutcome == .deadlineExhausted {
+        NSLog(
+          "AGENT_DEVICE_RUNNER_SNAPSHOT_TIER_DEADLINE_EXHAUSTED backend=%@ nodes=%d",
+          kind.rawValue,
+          Self.payloadNodeCount(capture.payload)
+        )
+      }
+      if let rejection = Self.snapshotTierRejectionReason(
+        outcome: attempt.tierOutcome,
+        kind: kind,
+        payload: capture.qualityPayload ?? capture.payload
+      ) {
+        if firstFailure == nil { firstFailure = rejection }
         if Self.payloadNodeCount(capture.payload) > Self.payloadNodeCount(best?.capture.payload) {
           best = (kind, capture)
         }
@@ -412,19 +428,21 @@ extension RunnerTests {
 
   private func captureWithBackend(
     _ kind: SnapshotBackendKind,
-    app: XCUIApplication,
+    target: SnapshotCaptureTarget,
     options: PresentationOptions,
     deadline: Date,
     treeCaptureSliceBudgetOverride: TimeInterval?
   ) throws -> SnapshotBackendAttempt {
+    let app = target.app
     let hint = SnapshotPresentation.captureHint(for: options)
     var timer = SnapshotPhaseTimer()
     let acquisition: SnapshotAcquisition?
+    let tierOutcome: SnapshotTierOutcome
     // The band is read inside the tree tier's own bounded work, so it has to be lifted out of the
     // acquisition phase and carried to the stamping step, where the payload is assembled (#2660).
     var keyboardBand: RunnerKeyboardBandFact?
     do {
-      acquisition = try timer.measure(.acquisition) {
+      let measured = try timer.measure(.acquisition) { () -> (SnapshotAcquisition?, SnapshotTierOutcome) in
         switch kind {
         case .recursiveTree:
           guard
@@ -435,10 +453,10 @@ extension RunnerTests {
               treeCaptureSliceBudgetOverride: treeCaptureSliceBudgetOverride
             )
           else {
-            return nil
+            return (nil, .completed)
           }
           keyboardBand = context.keyboardBand
-          return try self.runMainThreadWork(
+          let tree = try self.runMainThreadWork(
             "tree_processing",
             timeout: min(self.treeCaptureSliceBudget, max(0.5, deadline.timeIntervalSinceNow)),
             timeoutError: self.snapshotMainThreadTimeoutError("processing tree snapshot")
@@ -447,26 +465,34 @@ extension RunnerTests {
               ? try self.rawTreeSnapshotAcquisition(context: context, hint: hint)
               : try self.recursiveTreeSnapshotAcquisition(context: context, hint: hint)
           }
+          return (tree, .completed)
         case .querySweep:
-          return try self.runMainThreadWork(
+          let sliceDeadline = Self.querySweepSliceDeadline(startedAt: Date(), planDeadline: deadline)
+          let sweep = try self.runMainThreadWork(
             "query_sweep",
-            timeout: min(Self.flatInteractiveFallbackBudget, max(0.1, deadline.timeIntervalSinceNow)),
+            timeout: max(0.1, sliceDeadline.timeIntervalSinceNow),
             timeoutError: self.snapshotMainThreadTimeoutError("running query-sweep snapshot")
           ) {
             self.querySweepSnapshotAcquisition(
               app: app,
               hint: hint,
-              planDeadline: deadline
+              sliceDeadline: sliceDeadline
             )
           }
+          return (sweep.acquisition, sweep.outcome)
         case .privateAX:
-          return self.privateAXSnapshotAcquisition(
-            app: app,
-            hint: hint,
-            deadline: deadline
+          return (
+            self.privateAXSnapshotAcquisition(
+              target: target,
+              hint: hint,
+              deadline: deadline
+            ),
+            .completed
           )
         }
       }
+      acquisition = measured.0
+      tierOutcome = measured.1
     } catch let failure as SnapshotCaptureFailure {
       return SnapshotBackendAttempt(
         outcome: .failed(failure, phase: .acquisition),
@@ -476,7 +502,8 @@ extension RunnerTests {
     guard let acquisition else {
       return SnapshotBackendAttempt(
         outcome: .noCapture,
-        timing: timer.timing
+        timing: timer.timing,
+        tierOutcome: tierOutcome
       )
     }
 
@@ -511,12 +538,14 @@ extension RunnerTests {
     } catch let failure as SnapshotPresentationFailure {
       return SnapshotBackendAttempt(
         outcome: .failed(Self.snapshotCaptureFailure(for: failure), phase: .presentation),
-        timing: timer.timing
+        timing: timer.timing,
+        tierOutcome: tierOutcome
       )
     } catch let failure as SnapshotCaptureFailure {
       return SnapshotBackendAttempt(
         outcome: .failed(failure, phase: .presentation),
-        timing: timer.timing
+        timing: timer.timing,
+        tierOutcome: tierOutcome
       )
     }
 
@@ -525,7 +554,8 @@ extension RunnerTests {
     capture.keyboardBand = keyboardBand?.payload
     return SnapshotBackendAttempt(
       outcome: .captured(capture),
-      timing: timer.timing
+      timing: timer.timing,
+      tierOutcome: tierOutcome
     )
   }
 
@@ -545,6 +575,24 @@ extension RunnerTests {
   }
 
   // MARK: Quality classifier (the single source of "is this snapshot degraded")
+
+  /// Why a captured tier may not end the plan, or nil when it may. A tier that stopped starting work
+  /// at its own deadline is rejected as a timeout whatever it collected: keeping its payload as the
+  /// fallback is right, accepting it is not, and a node count cannot tell a finished capture from a
+  /// sweep the slice cut short (#2781).
+  static func snapshotTierRejectionReason(
+    outcome: SnapshotTierOutcome,
+    kind: SnapshotBackendKind,
+    payload: DataPayload
+  ) -> (reason: String, code: String)? {
+    if outcome == .deadlineExhausted {
+      return (
+        "the \(kind.rawValue) backend spent its capture slice with the collection unfinished",
+        "budget"
+      )
+    }
+    return sparsePayloadReason(payload)
+  }
 
   /// Returns a degradation reason + machine code when the payload is too degraded to accept.
   static func sparsePayloadReason(_ payload: DataPayload) -> (reason: String, code: String)? {
@@ -635,7 +683,10 @@ extension RunnerTests {
     state: String,
     reason: (reason: String, code: String)?
   ) -> DataPayload {
-    runnerAccessibilityHealth = reason?.code == "ax-rejected" ? .unavailable : .healthy
+    let health: RunnerAccessibilityHealth = reason?.code == "ax-rejected" ? .unavailable : .healthy
+    applyMainOwnedSnapshotState("accessibility_health") {
+      self.runnerAccessibilityHealth = health
+    }
     let payload = capture.payload
     let quality = SnapshotQuality(
       state: state,

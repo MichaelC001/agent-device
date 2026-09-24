@@ -132,6 +132,20 @@ extension RunnerTests {
   ]
 
   static let flatInteractiveFallbackBudget: TimeInterval = 1.0
+  /// The least slice time a sweep query may start with. XCTest cannot cancel a query, so one that
+  /// starts later outlives the slice its caller waits for and holds the main thread (#2783).
+  static let flatInteractiveQueryBudget: TimeInterval = 0.1
+
+  /// The deadline the query-sweep tier's caller waits for: one slice, clamped to the plan deadline.
+  /// Interactive and non-interactive requests share it, since the caller discards a later result.
+  static func querySweepSliceDeadline(startedAt: Date, planDeadline: Date) -> Date {
+    min(startedAt.addingTimeInterval(flatInteractiveFallbackBudget), planDeadline)
+  }
+
+  /// Whether a sweep query started at `now` can still finish before the slice `deadline`.
+  static func querySweepCanStartQuery(deadline: Date, now: Date) -> Bool {
+    deadline.timeIntervalSince(now) >= flatInteractiveQueryBudget
+  }
 
   /// What one capture may spend reading the keyboard band before it gives up on the fact and lets the
   /// tap guard fall back to the tree rule. The scroll path pays this query per gesture and stays well
@@ -145,14 +159,17 @@ extension RunnerTests {
   // `boundedBlockingSystemAlertSnapshot`'s probe closure (see `systemModalProbeOverrideForTesting`
   // in RunnerTests.swift), so reverting this entry point to bypass the bounded probe fails the
   // regression test.
-  func snapshotFast(app: XCUIApplication, options: PresentationOptions) throws -> DataPayload {
+  func snapshotFast(target: SnapshotCaptureTarget, options: PresentationOptions) throws -> DataPayload {
     let deadline = Date().addingTimeInterval(Self.snapshotPlanBudget)
-    if let blocking = boundedBlockingSystemAlertSnapshot(deadline: deadline) {
+    if let blocking = boundedBlockingSystemAlertSnapshot(
+      deadline: deadline,
+      penaltyTarget: .prepared(bundleId: target.bundleId)
+    ) {
       return blocking
     }
     return try runSnapshotCapturePlan(
       Self.regularVisiblePlan,
-      app: app,
+      target: target,
       options: options,
       terminal: .sparseWithFatalOnAXFailure,
       deadline: deadline
@@ -267,14 +284,17 @@ extension RunnerTests {
   }
 
   // See `snapshotFast` above: the single production entry point, no unit-test overload.
-  func snapshotRaw(app: XCUIApplication, options: PresentationOptions) throws -> DataPayload {
+  func snapshotRaw(target: SnapshotCaptureTarget, options: PresentationOptions) throws -> DataPayload {
     let deadline = Date().addingTimeInterval(Self.snapshotPlanBudget)
-    if let blocking = boundedBlockingSystemAlertSnapshot(deadline: deadline) {
+    if let blocking = boundedBlockingSystemAlertSnapshot(
+      deadline: deadline,
+      penaltyTarget: .prepared(bundleId: target.bundleId)
+    ) {
       return blocking
     }
     return try runSnapshotCapturePlan(
       Self.rawDiagnosticPlan,
-      app: app,
+      target: target,
       options: options,
       terminal: .throwOnAXFailure,
       deadline: deadline
@@ -283,8 +303,15 @@ extension RunnerTests {
 
   /// Runs the pre-plan SpringBoard system-modal probe as a bounded capture tier sharing the plan
   /// deadline, so a slow alert enumeration cannot bypass the snapshot timeout and stall (#1244).
-  func boundedBlockingSystemAlertSnapshot(deadline: Date) -> DataPayload? {
-    boundedBlockingSystemAlertSnapshotBody(deadline: deadline) { probeDeadline in
+  /// An abandoned probe penalizes the XCTest channel for `penaltyTarget`.
+  func boundedBlockingSystemAlertSnapshot(
+    deadline: Date,
+    penaltyTarget: SnapshotProbePenaltyTarget
+  ) -> DataPayload? {
+    boundedBlockingSystemAlertSnapshotBody(
+      deadline: deadline,
+      penaltyTarget: penaltyTarget
+    ) { probeDeadline in
       #if AGENT_DEVICE_RUNNER_UNIT_TESTS
       if let override = self.systemModalProbeOverrideForTesting {
         return override(probeDeadline)
@@ -301,6 +328,7 @@ extension RunnerTests {
   /// production runs and what the unit tests exercise.
   private func boundedBlockingSystemAlertSnapshotBody(
     deadline: Date,
+    penaltyTarget: SnapshotProbePenaltyTarget,
     probe: @escaping (Date) -> DataPayload?
   ) -> DataPayload? {
     #if os(macOS)
@@ -316,6 +344,7 @@ extension RunnerTests {
     }
     let probeDeadline = Date().addingTimeInterval(slice)
     let startedAt = Date()
+    let penaltyIdentity = SnapshotProbePenaltyIdentity(penaltyTarget)
     do {
       return try runMainThreadWork(
         "system_modal_probe",
@@ -329,12 +358,13 @@ extension RunnerTests {
         },
         onAbandoned: {
           self.penalizeSnapshotXCTestChannel(
-            bundleId: self.currentBundleId,
+            bundleId: penaltyIdentity.penalizedBundleId,
             reason: "system_modal_probe_timeout"
           )
         }
       ) {
-        probe(probeDeadline)
+        penaltyIdentity.captureFromMain(bundleId: self.currentBundleId)
+        return probe(probeDeadline)
       }
     } catch {
       NSLog(
@@ -413,37 +443,34 @@ extension RunnerTests {
   func querySweepSnapshotAcquisition(
     app: XCUIApplication,
     hint: CaptureHint,
-    planDeadline: Date = .distantFuture
-  ) -> SnapshotAcquisition {
+    sliceDeadline deadline: Date
+  ) -> (acquisition: SnapshotAcquisition, outcome: SnapshotTierOutcome) {
     var nodes: [RawAXNode] = [
       interactiveRootNode(rect: .zero)
     ]
     if hint.rawTraversalDepth == 0 || hint.regularPresentedDepth == 0 {
-      return SnapshotAcquisition(
-        hint: hint,
-        nodes: nodes,
-        truncated: false,
-        effectiveDepth: nil,
-        viewport: .infinite,
-        interfaceOrientation: RunnerInterfaceOrientation.unknown
+      return (
+        SnapshotAcquisition(
+          hint: hint,
+          nodes: nodes,
+          truncated: false,
+          effectiveDepth: nil,
+          viewport: .infinite,
+          interfaceOrientation: RunnerInterfaceOrientation.unknown
+        ),
+        .completed
       )
     }
 
-    // Bounded by both its own sweep budget and the umbrella capture-plan deadline, so a
-    // chained recovery tier can never push the plan past the main-thread watchdog (#1105).
-    let sweepDeadline = hint.interactiveOnly
-      ? Date().addingTimeInterval(Self.flatInteractiveFallbackBudget)
-      : Date.distantFuture
-    let deadline = min(sweepDeadline, planDeadline)
     let viewport = safeSnapshotViewport(app: app)
     var seen = Set<String>()
     var candidates: [RawAXNode] = []
     let flatElements = flatInteractiveElements(app: app, deadline: deadline)
-    var truncated = flatElements.truncated
+    var outcome = flatElements.outcome
     for element in flatElements.elements {
-      if Date() >= deadline {
+      if !Self.querySweepCanStartQuery(deadline: deadline, now: Date()) {
         NSLog("AGENT_DEVICE_RUNNER_SNAPSHOT_FLAT_FALLBACK_DEADLINE")
-        truncated = true
+        outcome = .deadlineExhausted
         break
       }
       guard let node = flatSnapshotNode(element: element, index: 0, parentIndex: 0) else {
@@ -491,20 +518,25 @@ extension RunnerTests {
         )
       )
     }
-    return SnapshotAcquisition(
-      hint: hint,
-      nodes: nodes,
-      truncated: truncated,
-      effectiveDepth: nil,
-      viewport: viewport,
-      interfaceOrientation: RunnerInterfaceOrientation.unknown
+    return (
+      SnapshotAcquisition(
+        hint: hint,
+        nodes: nodes,
+        truncated: outcome == .deadlineExhausted,
+        effectiveDepth: nil,
+        viewport: viewport,
+        interfaceOrientation: RunnerInterfaceOrientation.unknown
+      ),
+      outcome
     )
   }
 
   func snapshotAccessibilityUnavailable(failure: SnapshotCaptureFailure) -> DataPayload {
     NSLog("AGENT_DEVICE_RUNNER_SNAPSHOT_AX_UNAVAILABLE=%@", failure.message)
-    runnerAccessibilityHealth = .unavailable
-    invalidateCachedTarget(reason: Self.axSnapshotUnavailableReason)
+    applyMainOwnedSnapshotState("ax_unavailable_invalidation") {
+      self.runnerAccessibilityHealth = .unavailable
+      self.invalidateCachedTarget(reason: Self.axSnapshotUnavailableReason)
+    }
     // This is a planned terminal result, so it carries the structured verdict like every other
     // planned snapshot — downstream sparse handling keys off the verdict, not node shapes.
     return sparseTruncatedSnapshotPayload(
