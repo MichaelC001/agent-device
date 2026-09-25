@@ -464,6 +464,33 @@ test('a window reporting the app box quarter-turned is counted as an unresolved 
   );
 });
 
+test('the bridge tree carries a text field placeholder and omits an empty one', () => {
+  const field = (placeholder?: unknown) => ({
+    [application]: 'UITextField',
+    [frame]: { X: 16, Y: 200, Width: 370, Height: 44 },
+    XC_kAXXCAttributeValue: 'Ada Lovelace',
+    ...(placeholder === undefined ? {} : { XC_kAXXCAttributePlaceholderValue: placeholder }),
+    [children]: [],
+  });
+  const decode = (placeholder?: unknown) =>
+    decodeSnapshotBridgeTree(
+      { [application]: 'Application', [children]: [field(placeholder)] },
+      { truncated: false },
+      limits,
+    ).nodes[1];
+
+  const filled = decode('Type your name');
+  assert.equal(filled?.placeholder, 'Type your name');
+  assert.equal(filled?.value, 'Ada Lovelace', 'the value and the placeholder are separate facts');
+  assert.equal(decode('')?.placeholder, undefined, 'no placeholder reads as none, not as ""');
+  assert.equal(
+    decode('  ')?.placeholder,
+    undefined,
+    'a whitespace placeholder is none, as on the runner',
+  );
+  assert.equal(decode()?.placeholder, undefined, 'an unread fact stays unknown');
+});
+
 test('the bridge tree publishes whether a dimming view takes touches', () => {
   const dimming = (enabled?: unknown) => ({
     [application]: 'UIDimmingView',

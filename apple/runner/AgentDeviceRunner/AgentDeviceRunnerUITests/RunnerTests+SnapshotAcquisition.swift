@@ -189,6 +189,7 @@ extension RunnerTests {
       label: label,
       identifier: identifier,
       valueText: valueText,
+      placeholder: placeholderText(snapshot.placeholderValue),
       focused: snapshotHasFocus(snapshot),
       selected: snapshotIsSelected(snapshot)
     )
@@ -209,6 +210,7 @@ extension RunnerTests {
       label: evaluation.label.isEmpty ? nil : evaluation.label,
       identifier: evaluation.identifier.isEmpty ? nil : evaluation.identifier,
       value: evaluation.valueText,
+      placeholder: evaluation.placeholder,
       rect: SnapshotRect(snapshot.frame),
       enabled: snapshot.isEnabled,
       focused: evaluation.focused ? true : nil,
@@ -233,6 +235,26 @@ extension RunnerTests {
     guard let value = snapshot.value else { return nil }
     let text = String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines)
     return text.isEmpty ? nil : text
+  }
+
+  /// The placeholder as the node publishes it: XCTest answers `placeholderValue` for a text field
+  /// whether or not the field is empty, and an empty string for everything else, which reads as
+  /// no placeholder. The private-AX bridge asks the AX server the same attribute.
+  func placeholderText(_ placeholderValue: String?) -> String? {
+    let text = placeholderValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return text.isEmpty ? nil : text
+  }
+
+  /// The element types whose `placeholderValue` the element sweeps read. On a live `XCUIElement`
+  /// every attribute is one more lookup inside the sweep's deadline, so only text entry pays for
+  /// it; a snapshot-based producer reads the attribute off the snapshot it already holds.
+  static let placeholderElementTypes: Set<XCUIElement.ElementType> = [
+    .textField, .secureTextField, .searchField, .textView,
+  ]
+
+  func elementPlaceholderText(_ element: XCUIElement, type: XCUIElement.ElementType) -> String? {
+    guard Self.placeholderElementTypes.contains(type) else { return nil }
+    return placeholderText(element.placeholderValue)
   }
 
   private func snapshotAppFrame(app: XCUIApplication) -> CGRect {
@@ -341,6 +363,7 @@ extension RunnerTests {
         label: node.label,
         identifier: node.identifier,
         value: node.value,
+        placeholder: node.placeholder,
         rect: node.rect,
         enabled: node.enabled,
         focused: node.focused,
@@ -376,7 +399,8 @@ extension RunnerTests {
       let label = element.label.trimmingCharacters(in: .whitespacesAndNewlines)
       let identifier = element.identifier.trimmingCharacters(in: .whitespacesAndNewlines)
       let valueText = snapshotValueText(element)
-      let hasContent = !label.isEmpty || !identifier.isEmpty || valueText != nil
+      let placeholder = elementPlaceholderText(element, type: elementType)
+      let hasContent = !label.isEmpty || !identifier.isEmpty || valueText != nil || placeholder != nil
       if !hasContent { return }
       if sameSemanticElement(
         containerSnapshot: containerSnapshot,
@@ -395,6 +419,7 @@ extension RunnerTests {
         label: label.isEmpty ? nil : label,
         identifier: identifier.isEmpty ? nil : identifier,
         value: valueText,
+        placeholder: placeholder,
         rect: SnapshotRect(frame),
         enabled: element.isEnabled,
         focused: elementHasFocus(element) ? true : nil,
@@ -574,6 +599,7 @@ extension RunnerTests {
         label: label.isEmpty ? nil : label,
         identifier: identifier.isEmpty ? nil : identifier,
         value: valueText,
+        placeholder: elementPlaceholderText(element, type: elementType),
         rect: SnapshotRect(frame),
         enabled: enabled,
         focused: elementHasFocus(element) ? true : nil,

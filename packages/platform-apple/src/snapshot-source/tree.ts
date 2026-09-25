@@ -16,6 +16,7 @@ const ATTRIBUTE = Object.freeze({
   elementBaseType: 'XC_kAXXCAttributeElementBaseType',
   label: 'XC_kAXXCAttributeLabel',
   value: 'XC_kAXXCAttributeValue',
+  placeholder: 'XC_kAXXCAttributePlaceholderValue',
   identifier: 'XC_kAXXCAttributeIdentifier',
   frame: 'XC_kAXXCAttributeFrame',
   automationType: 'XC_kAXXCAttributeAutomationType',
@@ -247,6 +248,8 @@ function nodeFacts(
   // shape the XCTest tree produces, so a `selected:` selector cannot tell the producers apart.
   const selected = traits === undefined || (traits & SELECTED_TRAIT) === 0n ? undefined : true;
   const userInteractionEnabled = optionalBoolean(value[ATTRIBUTE.userInteractionEnabled]);
+  // Trimmed like the runner's `placeholderText`: a whitespace placeholder is no placeholder.
+  const placeholder = optionalString(value[ATTRIBUTE.placeholder])?.trim();
   return {
     index,
     ...(parentIndex === undefined ? {} : { parentIndex }),
@@ -261,6 +264,7 @@ function nodeFacts(
     ...(optionalScalar(value[ATTRIBUTE.value])
       ? { value: optionalScalar(value[ATTRIBUTE.value]) }
       : {}),
+    ...(placeholder ? { placeholder } : {}),
     ...(optionalString(value[ATTRIBUTE.identifier])
       ? { identifier: optionalString(value[ATTRIBUTE.identifier]) }
       : {}),

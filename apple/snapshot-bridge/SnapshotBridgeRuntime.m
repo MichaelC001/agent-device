@@ -18,7 +18,7 @@
 NSString *const kProtocolVersionKey = @"protocolVersion";
 NSString *const kSourceVersionKey = @"sourceVersion";
 NSString *const kRequestIdKey = @"requestId";
-NSString *const kSourceVersion = @"agent-device-simulator-ax-v1.7.0";
+NSString *const kSourceVersion = @"agent-device-simulator-ax-v1.8.0";
 const NSUInteger kProtocolVersion = 1;
 const uint32_t kMaximumFrameBytes = 16 * 1024 * 1024;
 const NSUInteger kMaximumDepth = 128;
@@ -29,6 +29,7 @@ static NSString *const kAttributeElementType = @"XC_kAXXCAttributeElementType";
 static NSString *const kAttributeElementBaseType = @"XC_kAXXCAttributeElementBaseType";
 static NSString *const kAttributeLabel = @"XC_kAXXCAttributeLabel";
 static NSString *const kAttributeValue = @"XC_kAXXCAttributeValue";
+static NSString *const kAttributePlaceholderValue = @"XC_kAXXCAttributePlaceholderValue";
 static NSString *const kAttributeIdentifier = @"XC_kAXXCAttributeIdentifier";
 static NSString *const kAttributeFrame = @"XC_kAXXCAttributeFrame";
 static NSString *const kAttributeAutomationType = @"XC_kAXXCAttributeAutomationType";
@@ -330,6 +331,7 @@ static void finishRequestWatchdog(dispatch_source_t watchdog, SnapshotWatchdogSt
     kAttributeElementBaseType,
     kAttributeLabel,
     kAttributeValue,
+    kAttributePlaceholderValue,
     kAttributeIdentifier,
     kAttributeFrame,
     kAttributeAutomationType,
@@ -337,6 +339,14 @@ static void finishRequestWatchdog(dispatch_source_t watchdog, SnapshotWatchdogSt
     kAttributeChildren,
   ];
   NSArray<NSNumber *> *numbers = _attributeNumbersForNames(names);
+  if (![numbers isKindOfClass:NSArray.class] || numbers.count != names.count) {
+    // The placeholder attribute is optional: a runtime whose vocabulary lacks it serves the capture
+    // without placeholders rather than failing every capture over a fact no consumer depends on.
+    NSMutableArray<NSString *> *required = [names mutableCopy];
+    [required removeObject:kAttributePlaceholderValue];
+    names = required;
+    numbers = _attributeNumbersForNames(names);
+  }
   if (![numbers isKindOfClass:NSArray.class] || numbers.count != names.count) {
     if (error) *error = failureResponse(requestId, @"reader_unavailable", @"attribute-vocabulary-mismatch", @"AX attribute vocabulary is incompatible");
     finishRequestWatchdog(watchdog, watchdogState);
