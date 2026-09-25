@@ -20,6 +20,7 @@ extension RunnerTests {
     XCTAssertEqual(command.steps?[2].pauseMs, 50)
   }
 
+  @MainActor
   func testSequenceAcceptsDoubleTapKind() {
     // A doubleTap step missing coords must fail on the coords check, not the kind allowlist —
     // proving "doubleTap" passes validateSequenceStep without needing a device to execute on.
@@ -32,6 +33,7 @@ extension RunnerTests {
     XCTAssertFalse(response.error?.message.contains("unsupported kind") ?? true)
   }
 
+  @MainActor
   func testSequenceRejectsUnknownKind() throws {
     let response = executeSequenceForTest(steps: [
       sequenceStep(kind: "tap", x: 1, y: 2),
@@ -43,12 +45,14 @@ extension RunnerTests {
     XCTAssertTrue(response.error?.message.contains("pinch") ?? false)
   }
 
+  @MainActor
   func testSequenceRejectsEmpty() {
     let response = executeSequenceForTest(steps: [])
     XCTAssertEqual(response.ok, false)
     XCTAssertEqual(response.error?.code, "INVALID_ARGS")
   }
 
+  @MainActor
   func testSequenceRejectsTooManySteps() {
     let steps = (0..<21).map { _ in sequenceStep(kind: "tap", x: 1, y: 2) }
     let response = executeSequenceForTest(steps: steps)
@@ -151,6 +155,7 @@ extension RunnerTests {
 
   /// Validation runs before any executor call, so the INVALID_ARGS paths are exercised without
   /// reaching the device executor (which is never invoked when validation rejects).
+  @MainActor
   private func executeSequenceForTest(steps: [SequenceStep]) -> Response {
     let command = makeSequenceCommand(steps: steps)
     return executeSequence(command: command, activeApp: app)
@@ -172,10 +177,11 @@ extension RunnerTests {
 
 #if AGENT_DEVICE_RUNNER_UNIT_TESTS && os(iOS)
 extension RunnerTests {
+  @MainActor
   func testSynthesizedSequenceTapFallsBackToXCTestCoordinateTapWhenAccessibilityIsUnavailable() throws {
     let restoreSynthesizedTap = try forceSynthesizedTapFailure()
     app.launch()
-    currentApp = app
+    mainOwned.app = app
     defer {
       restoreSynthesizedTap()
       invalidateCachedTarget(reason: "unit_test_cleanup")
@@ -184,7 +190,7 @@ extension RunnerTests {
     let label = app.staticTexts["Agent Device Runner"]
     XCTAssertTrue(label.waitForExistence(timeout: appExistenceTimeout))
     let point = CGPoint(x: label.frame.midX, y: label.frame.midY)
-    runnerAccessibilityHealth = .unavailable
+    mainOwned.accessibilityHealth = .unavailable
     let command = try runnerCommandFixture(
       #"{"command":"sequence","commandId":"sequence-synthesized-tap-fallback","steps":[{"kind":"tap","x":\#(point.x),"y":\#(point.y),"synthesized":true}]}"#
     )

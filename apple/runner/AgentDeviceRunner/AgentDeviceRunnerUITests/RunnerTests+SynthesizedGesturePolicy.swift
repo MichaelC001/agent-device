@@ -125,6 +125,7 @@ enum SynthesizedGestureAttempt {
 }
 
 extension RunnerTests {
+  @MainActor
   func synthesizedSequenceCoordinateContext(
     steps: [SequenceStep],
     app: XCUIApplication
@@ -137,6 +138,7 @@ extension RunnerTests {
 
   /// `context` is nil when no window frame resolved; `kind`'s fallback policy then reads the
   /// runner's current accessibility health.
+  @MainActor
   func performSynthesizedGesture(
     _ app: XCUIApplication,
     kind: SynthesizedGesturePolicyKind,
@@ -149,7 +151,7 @@ extension RunnerTests {
       return .performed(timing: timing)
     }
     let fallbackAllowed = synthesizedGesturePolicy(kind).fallbackPolicy.allowsXCTestCoordinateFallback(
-      accessibilityHealth: context?.accessibilityHealth ?? runnerAccessibilityHealth
+      accessibilityHealth: context?.accessibilityHealth ?? mainOwned.accessibilityHealth
     )
     logSynthesizedGesturePolicyDecision(
       kind: kind,
@@ -161,6 +163,7 @@ extension RunnerTests {
       : .refused(timing: timing, message: message, hint: hint)
   }
 
+  @MainActor
   func logSynthesizedGesturePolicyDecision(
     kind: SynthesizedGesturePolicyKind,
     context: SynthesizedCoordinateContext?,
