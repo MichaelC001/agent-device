@@ -91,8 +91,9 @@ extension RunnerTests {
   // A value with a hole in the middle is neither a matching prefix nor an exact match, and must
   // never settle. These are the two corruption strings actually observed in CI on `fill`
   // (id="field-name" "Ada Lovelace" -> "Avelace", id="field-email" "ada@example" -> "aexample";
-  // first character and tail survive, a middle run is missing).
-  func testSynthesizedReplacementCommitCatchesDroppedMiddleCharacters() {
+  // first character and tail survive, a middle run is missing). The wait can refuse a value like
+  // this but not repair it: no later read distinguishes it from a field that has settled.
+  func testSynthesizedReplacementCommitCatchesMiddleRunMissingFromTheField() {
     let corruptions: [(expected: String, observedAfterDrop: String)] = [
       (expected: "Ada Lovelace", observedAfterDrop: "Avelace"),
       (expected: "ada@example", observedAfterDrop: "aexample"),
@@ -240,6 +241,98 @@ extension RunnerTests {
     )
   }
 
+  // The pace is what keeps a field the app owns from losing most of a replacement (#2080), so it
+  // cannot drift on its own: one character interval has to leave that app at least twice the
+  // acknowledge window the route is sized for. The host lane runs this on every PR; the iOS lane's
+  // app-owned-value test checks the spacing the app actually receives.
+  func testSynthesizedPaceLeavesRoomForAnAppToAcknowledgeEachEdit() {
+    XCTAssertGreaterThanOrEqual(
+      SynthesizedDeliveryBudget.characterInterval,
+      2 * TextEntryTiming.synthesizedAcknowledgeWindowSeconds
+    )
+  }
+
+  // Characters are delivered while the private synthesize call is still running, so text longer
+  // than the delivery ceiling would still be arriving when the main-thread watchdog abandons the
+  // command. The budget turns that into a refusal decided up front, at the boundary and not after
+  // the first character is posted.
+  func testSynthesizedDeliveryBudgetRefusesTextThatOutrunsTheCommand() {
+    let fits = SynthesizedDeliveryBudget.maxTextLength(delaySeconds: 0)
+    XCTAssertGreaterThan(fits, 0)
+    XCTAssertFalse(SynthesizedDeliveryBudget.exceeds(textLength: fits, delaySeconds: 0))
+    XCTAssertTrue(SynthesizedDeliveryBudget.exceeds(textLength: fits + 1, delaySeconds: 0))
+  }
+
+  // A spaced plan posts each character in its own synthesize call and sleeps between two of them,
+  // so a character costs the pace, the call's overhead and the delay together, not the larger of
+  // pace and delay. The delay checked is the retry TEXT_INPUT_COMMIT_NOT_OBSERVED recommends.
+  func testSpacedDeliveryBudgetChargesEachCharacterItsCallAndDelay() {
+    let delay = Double(TextEntryTiming.recoveryDelayMilliseconds) / 1000
+    let fits = SynthesizedDeliveryBudget.maxTextLength(delaySeconds: delay)
+    XCTAssertFalse(SynthesizedDeliveryBudget.exceeds(textLength: fits, delaySeconds: delay))
+    XCTAssertTrue(SynthesizedDeliveryBudget.exceeds(textLength: fits + 1, delaySeconds: delay))
+    XCTAssertEqual(
+      SynthesizedDeliveryBudget.projectedSeconds(textLength: 10, delaySeconds: delay)
+        - SynthesizedDeliveryBudget.projectedSeconds(textLength: 9, delaySeconds: delay),
+      SynthesizedDeliveryBudget.characterInterval
+        + TextEntryTiming.synthesizeCallOverhead
+        + delay,
+      accuracy: 1e-9
+    )
+    XCTAssertLessThan(fits, SynthesizedDeliveryBudget.maxTextLength(delaySeconds: 0))
+    XCTAssertLessThan(SynthesizedDeliveryBudget.maxTextLength(delaySeconds: 0.2), fits)
+  }
+
+  // A `type` plan peels one character as a warmup and posts the rest afterwards, so the same text
+  // costs one synthesize call and one wait more than the single burst the replacement route posts.
+  // Without this the estimate charged a burst, which is what made the over-budget branch of the
+  // keyboard-visible route unreachable: 215 characters looked like 1 + 214, each inside the budget.
+  func testTypeWarmupSplitCostsOneMoreCallThanASingleBurst() {
+    let length = 20
+    let withWarmup = SynthesizedDeliveryBudget.projectedSeconds(
+      textLength: length,
+      delaySeconds: 0,
+      typeWarmup: true
+    )
+    XCTAssertGreaterThan(
+      withWarmup,
+      SynthesizedDeliveryBudget.projectedSeconds(textLength: length, delaySeconds: 0)
+    )
+    XCTAssertEqual(
+      withWarmup - SynthesizedDeliveryBudget.projectedSeconds(textLength: length, delaySeconds: 0),
+      TextEntryTiming.synthesizeCallOverhead + TextEntryTiming.pollInterval,
+      accuracy: 1e-9
+    )
+    // The split mirrors the plan: a spaced `type` already posts per character, and a single
+    // character has no rest to post.
+    XCTAssertEqual(
+      SynthesizedDeliveryBudget.projectedSeconds(textLength: length, delaySeconds: 0.2, typeWarmup: true),
+      SynthesizedDeliveryBudget.projectedSeconds(textLength: length, delaySeconds: 0.2)
+    )
+    XCTAssertEqual(
+      SynthesizedDeliveryBudget.projectedSeconds(textLength: 1, delaySeconds: 0, typeWarmup: true),
+      SynthesizedDeliveryBudget.projectedSeconds(textLength: 1, delaySeconds: 0)
+    )
+  }
+
+  func testSynthesizedBudgetExceededCarriesItsOwnCodeAndRecovery() {
+    XCTAssertEqual(
+      TextEntryFailure.synthesisBudgetExceeded.rawValue,
+      "TEXT_INPUT_SYNTHESIS_BUDGET_EXCEEDED"
+    )
+    // The recovery has to tell the caller to split the text: waiting it out or raising a timeout
+    // does nothing, because the pace is what makes the burst long, not the host being slow. A
+    // delayed request fits fewer characters, so the hint names both budgets rather than promising
+    // the undelayed one to a caller retrying with --delay-ms.
+    let hint = TextEntryFailure.synthesisBudgetExceeded.hint
+    XCTAssertTrue(hint.contains("\(SynthesizedDeliveryBudget.maxTextLength(delaySeconds: 0)) characters at a time"))
+    let recoveryDelay = TextEntryTiming.recoveryDelayMilliseconds
+    let recoveryBudget = SynthesizedDeliveryBudget.maxTextLength(
+      delaySeconds: Double(recoveryDelay) / 1000
+    )
+    XCTAssertTrue(hint.contains("\(recoveryBudget) characters at --delay-ms \(recoveryDelay)"))
+  }
+
 #if os(iOS)
   func testTypeTextReliablyPacesSynthesizedReplacementThroughProductionCaller() {
     let synthesizer = RecordingTextEntrySynthesizer()
@@ -284,8 +377,8 @@ extension RunnerTests {
     // landing as "aexample" CI signature). The fake synthesizer never actually writes into
     // Springboard, so the wait's `observe()` reads nil (no matching field at that point) on every
     // poll and the value never becomes "abc" — under the replacement-mode outcome function that is
-    // correctly a failure (see `testSynthesizedReplacementCommitCatchesDroppedMiddleCharacters` for
-    // why it must NOT be waved through as success), so this call runs the real 3-second deadline
+    // correctly a failure (see `testSynthesizedReplacementCommitCatchesMiddleRunMissingFromTheField`
+    // for why it must NOT be waved through as success), so this call runs the real 3-second deadline
     // (`TextEntryTiming.synthesizedCommitStallTimeout`; a nil read never advances the expected
     // prefix, so `SynthesizedCommitDeadline` grants it no extra time) before returning. That is
     // deliberate here, not a flake: this test only runs in the nightly XCUITest lane (see

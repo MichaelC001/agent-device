@@ -65,6 +65,15 @@ int main(int argc, const char *argv[]) {
 @property(nonatomic, strong) UILabel *alertActivationBusyAnswer;
 @property(nonatomic, assign) NSUInteger firstAlertActions;
 @property(nonatomic, assign) NSUInteger replacementAlertActions;
+@property(nonatomic, strong) UILabel *textEntryWriteBackStatus;
+@property(nonatomic, assign) NSUInteger textEntryRenderedEdits;
+@property(nonatomic, assign) NSUInteger textEntryWriteBacks;
+@property(nonatomic, copy, nullable) NSString *textEntryRenderedValue;
+@property(nonatomic, assign) NSTimeInterval textEntryLastEditTime;
+@property(nonatomic, assign) NSTimeInterval textEntryBurstStartTime;
+@property(nonatomic, assign) NSUInteger textEntryBurstEdits;
+@property(nonatomic, assign) NSTimeInterval textEntryBurstMinGap;
+@property(nonatomic, assign) NSTimeInterval textEntryAcknowledgeWindowSeconds;
 @property(nonatomic, assign) BOOL alertFixtureStarted;
 @property(nonatomic, strong) NSTimer *alertActivationBusyBackstop;
 @property(nonatomic, strong) NSTimer *alertBannerRepost;
@@ -175,6 +184,17 @@ static NSTimeInterval AgentDeviceAlertActivationBusyWindow(void) {
                                                          (unsigned long)self.replacementAlertActions];
 }
 
+- (void)updateTextEntryWriteBackStatus {
+  NSTimeInterval burstSpan = self.textEntryLastEditTime - self.textEntryBurstStartTime;
+  self.textEntryWriteBackStatus.text = [NSString
+    stringWithFormat:@"edits=%lu write-backs=%lu burst-edits=%lu burst-ms=%lu min-gap-ms=%lu",
+                     (unsigned long)self.textEntryRenderedEdits,
+                     (unsigned long)self.textEntryWriteBacks,
+                     (unsigned long)self.textEntryBurstEdits,
+                     (unsigned long)llround(burstSpan * 1000),
+                     (unsigned long)llround(self.textEntryBurstMinGap * 1000)];
+}
+
 - (void)presentAlertFixtureReplacement:(BOOL)replacement {
   NSArray<NSString *> *arguments = NSProcessInfo.processInfo.arguments;
   BOOL sameTitle = [arguments containsObject:@"--agent-device-alert-same-title"];
@@ -232,7 +252,51 @@ static NSTimeInterval AgentDeviceAlertActivationBusyWindow(void) {
 }
 #endif
 
+// How fast an app that owns this field's value can acknowledge edits: one render per window, passed
+// by the test as `--agent-device-text-entry-acknowledge-window <seconds>`. An edit that arrives
+// inside that window overtook the render still in flight, so the value that render commits predates
+// it and writing it erases the characters that got ahead of the app. The app then reads its own
+// erasure back into its model, which is why the field stays wrong instead of healing when the burst
+// finishes. The window is decided at the edit rather than scheduled, so a loaded host, which
+// stretches the gaps between characters, can only make this app keep up better.
+static NSTimeInterval AgentDeviceTextEntryAcknowledgeWindow(void) {
+  NSArray<NSString *> *arguments = NSProcessInfo.processInfo.arguments;
+  NSUInteger index = [arguments indexOfObject:@"--agent-device-text-entry-acknowledge-window"];
+  return index == NSNotFound || index + 1 >= arguments.count ? 0 : [arguments[index + 1] doubleValue];
+}
+
+// Edits further apart than this belong to different bursts: one runner command's characters arrive
+// well inside it, and two commands are separated by at least a commit-wait poll and a status read.
+static const NSTimeInterval AgentDeviceTextEntryBurstBreakSeconds = 1.0;
+
 - (void)agentDeviceTextEntryDidChange:(UITextField *)textField {
+  // A field whose app owns its value, the way a controlled React Native `TextInput` does. A burst
+  // typed faster than the app renders loses the characters that arrived while a render was in
+  // flight, and the field settles stable short of the request.
+  if ([NSProcessInfo.processInfo.arguments containsObject:@"--agent-device-text-entry-app-owned-value"]) {
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    NSTimeInterval gap = now - self.textEntryLastEditTime;
+    BOOL overtookARender = self.textEntryRenderedValue != nil && gap < self.textEntryAcknowledgeWindowSeconds;
+    if (self.textEntryBurstEdits == 0 || gap > AgentDeviceTextEntryBurstBreakSeconds) {
+      self.textEntryBurstStartTime = now;
+      self.textEntryBurstEdits = 0;
+      self.textEntryBurstMinGap = 0;
+    } else if (self.textEntryBurstEdits == 1 || gap < self.textEntryBurstMinGap) {
+      self.textEntryBurstMinGap = gap;
+    }
+    self.textEntryBurstEdits += 1;
+    self.textEntryLastEditTime = now;
+    if (overtookARender) {
+      if (![textField.text isEqualToString:self.textEntryRenderedValue]) {
+        textField.text = self.textEntryRenderedValue;
+        self.textEntryWriteBacks += 1;
+      }
+    } else {
+      self.textEntryRenderedValue = [textField.text copy];
+      self.textEntryRenderedEdits += 1;
+    }
+    [self updateTextEntryWriteBackStatus];
+  }
   if ([NSProcessInfo.processInfo.arguments containsObject:@"--agent-device-text-entry-disappear-after-input"] &&
       textField.text.length > 0) {
     [textField removeFromSuperview];
@@ -281,7 +345,13 @@ static NSTimeInterval AgentDeviceAlertActivationBusyWindow(void) {
     UITextField *textField = [[UITextField alloc] init];
     textField.accessibilityIdentifier = @"agent-device-hardware-keyboard-input";
     textField.borderStyle = UITextBorderStyleRoundedRect;
-    textField.inputView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
+    // An empty input view keeps the software keyboard down, which is the hardware-keyboard responder
+    // these routes are addressed to. `--agent-device-text-entry-soft-keyboard` leaves the real input
+    // view in place, so a lane test can reach the branch that requires a visible keyboard.
+    if (![NSProcessInfo.processInfo.arguments
+           containsObject:@"--agent-device-text-entry-soft-keyboard"]) {
+      textField.inputView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
+    }
     [textField addTarget:self
                   action:@selector(agentDeviceTextEntryDidChange:)
         forControlEvents:UIControlEventEditingChanged];
@@ -293,6 +363,21 @@ static NSTimeInterval AgentDeviceAlertActivationBusyWindow(void) {
       [textField.widthAnchor constraintEqualToConstant:240],
       [textField.heightAnchor constraintEqualToConstant:44],
     ]];
+    if ([NSProcessInfo.processInfo.arguments containsObject:@"--agent-device-text-entry-app-owned-value"]) {
+      self.textEntryAcknowledgeWindowSeconds = AgentDeviceTextEntryAcknowledgeWindow();
+      // Reports how many edits this app rendered and how many writes it had to make because a
+      // character overtook one, so a lane test can tell a burst the app kept up with from an inert
+      // fixture. Counts only: no field content crosses into the test.
+      self.textEntryWriteBackStatus = [[UILabel alloc] init];
+      self.textEntryWriteBackStatus.accessibilityIdentifier = @"agent-device-text-entry-write-backs";
+      self.textEntryWriteBackStatus.translatesAutoresizingMaskIntoConstraints = NO;
+      [self.view addSubview:self.textEntryWriteBackStatus];
+      [NSLayoutConstraint activateConstraints:@[
+        [self.textEntryWriteBackStatus.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [self.textEntryWriteBackStatus.topAnchor constraintEqualToAnchor:textField.bottomAnchor constant:12],
+      ]];
+      [self updateTextEntryWriteBackStatus];
+    }
   }
 
   if ([NSProcessInfo.processInfo.arguments containsObject:@"--agent-device-crowded-screen"]) {

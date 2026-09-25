@@ -8,6 +8,7 @@ extension RunnerTests {
     case notFocused = "TEXT_INPUT_NOT_FOCUSED"
     case synthesisUnavailable = "TEXT_INPUT_SYNTHESIS_UNAVAILABLE"
     case commitNotObserved = "TEXT_INPUT_COMMIT_NOT_OBSERVED"
+    case synthesisBudgetExceeded = "TEXT_INPUT_SYNTHESIS_BUDGET_EXCEEDED"
 
     var message: String {
       switch self {
@@ -17,6 +18,8 @@ extension RunnerTests {
         return "Reliable text synthesis is unavailable while the software keyboard is hidden."
       case .commitNotObserved:
         return "The runner could not confirm the typed text reached the field."
+      case .synthesisBudgetExceeded:
+        return "The text is longer than one runner command can type at this pace."
       }
     }
 
@@ -27,7 +30,13 @@ extension RunnerTests {
       case .synthesisUnavailable:
         return "Show the software keyboard, then retry type."
       case .commitNotObserved:
-        return "The field may hold none, part, or all of the text. Run snapshot -i and inspect the field: if it already matches, continue; otherwise retry fill with the full text quoted and --delay-ms 80. Do not use type, which appends to whatever committed."
+        return "The field may hold none, part, or all of the text. Run snapshot -i and inspect the field: if it already matches, continue; otherwise retry fill with the full text quoted and --delay-ms \(TextEntryTiming.recoveryDelayMilliseconds). Do not use type, which appends to whatever committed."
+      case .synthesisBudgetExceeded:
+        let recoveryDelay = TextEntryTiming.recoveryDelayMilliseconds
+        let recoveryBudget = SynthesizedDeliveryBudget.maxTextLength(
+          delaySeconds: Double(recoveryDelay) / 1000
+        )
+        return "Fill at most \(SynthesizedDeliveryBudget.maxTextLength(delaySeconds: 0)) characters at a time without --delay-ms and append the rest with separate type commands, keeping each command inside that budget. --delay-ms lowers the budget, because each character then gets its own synthesize call and each gap between characters pays the delay: \(recoveryBudget) characters at --delay-ms \(recoveryDelay). A longer timeout does not help: this route is chosen when the accessibility channel is already degraded, and the pace is what makes the text long."
       }
     }
   }
@@ -49,10 +58,31 @@ extension RunnerTests {
     /// Numerically the flat deadline this replaced, so a pipeline that delivers nothing is
     /// condemned at exactly the same instant it always was (see `SynthesizedCommitDeadline`).
     static let synthesizedCommitStallTimeout: TimeInterval = 3.0
-    /// The commit wait's absolute bound, however long characters keep arriving. Sits well inside
-    /// the daemon's per-command budget (`RUNNER_COMMAND_TIMEOUT_MS`, 45s), which also has to cover
-    /// focus, clear and verification around this wait.
+    /// The commit wait's absolute bound, however long characters keep arriving. Synthesized
+    /// delivery happens before this wait starts and is bounded by `synthesizedDeliveryCeiling`.
     static let synthesizedCommitCeiling: TimeInterval = 10.0
+    /// What a synthesized replacement spends before its first character: focusing the field took
+    /// 374–500 ms through the daemon on an iPhone 17 Pro simulator.
+    static let synthesizedReplacementFocusAllowance: TimeInterval = 2.0
+    /// How long a synthesized burst may spend posting its characters: what the command's
+    /// main-thread watchdog leaves after focus and the longest commit wait. The private synthesize
+    /// call delivers as it returns, so text that does not fit is refused before the first character
+    /// is posted; otherwise the watchdog abandons the command with the runner still typing.
+    static let synthesizedDeliveryCeiling: TimeInterval = RunnerTests.mainThreadExecutionTimeout
+      - synthesizedReplacementFocusAllowance
+      - synthesizedCommitCeiling
+    /// The edit-acknowledge window the synthesized pace is sized for: on average, a burst's
+    /// characters reach the app at least this far apart. XCTest spaces them unevenly, so an app
+    /// with this window can still lose a character that arrives early; the command then refuses the
+    /// short value (#2906 tracks preventing it). The pace policy test and the app-owned-value lane
+    /// test pin the pace against it.
+    static let synthesizedAcknowledgeWindowSeconds: TimeInterval = 0.04
+    /// What one private synthesize call costs beyond typing its characters, which a `--delay-ms`
+    /// plan pays once per character. One-character calls at the shipped pace took 222 ms on average
+    /// on an iPhone 17 Pro simulator (212–617 ms over 235 calls), 83 ms of it the character.
+    static let synthesizeCallOverhead: TimeInterval = 0.15
+    /// The spacing the `TEXT_INPUT_COMMIT_NOT_OBSERVED` recovery tells the caller to retry with.
+    static let recoveryDelayMilliseconds = 80
     static let synthesizedCommitPollInterval: TimeInterval = 0.2
   }
 

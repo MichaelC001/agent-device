@@ -176,7 +176,7 @@ extension RunnerTests {
     }
     return try runMainThreadWork(
       "command_execution",
-      timeout: mainThreadExecutionTimeout,
+      timeout: Self.mainThreadExecutionTimeout,
       timeoutError: mainThreadExecutionTimeoutError
     ) {
       try self.executeOnMainSafely(command: command, routeToSpringboard: routeToSpringboard)
@@ -279,7 +279,7 @@ extension RunnerTests {
     while true {
       let failureCountBefore = try runMainThreadWork(
         "recorded_failure_count",
-        timeout: mainThreadExecutionTimeout,
+        timeout: Self.mainThreadExecutionTimeout,
         timeoutError: mainThreadExecutionTimeoutError
       ) {
         self.currentXCTestFailureCount()
@@ -296,7 +296,7 @@ extension RunnerTests {
       }
       let recordedFailureResponse = try runMainThreadWork(
         "recorded_failure_count",
-        timeout: mainThreadExecutionTimeout,
+        timeout: Self.mainThreadExecutionTimeout,
         timeoutError: mainThreadExecutionTimeoutError
       ) {
         self.didRecordXCTestFailure(since: failureCountBefore)
@@ -306,7 +306,7 @@ extension RunnerTests {
       if let recordedFailureResponse {
         try runMainThreadWork(
           "target_invalidation",
-          timeout: mainThreadExecutionTimeout,
+          timeout: Self.mainThreadExecutionTimeout,
           timeoutError: mainThreadExecutionTimeoutError
         ) {
           self.invalidateCachedTarget(reason: "xctest_recorded_failure")
@@ -321,7 +321,7 @@ extension RunnerTests {
         hasRetried = true
         try runMainThreadWork(
           "target_invalidation",
-          timeout: mainThreadExecutionTimeout,
+          timeout: Self.mainThreadExecutionTimeout,
           timeoutError: mainThreadExecutionTimeoutError
         ) {
           self.invalidateCachedTarget(reason: "response_unavailable")

@@ -82,15 +82,68 @@ extension RunnerTests {
     text: String,
     delaySeconds: Double
   ) -> [SynthesizedReplacementStep] {
-    let characters = Array(text)
-    guard delaySeconds > 0, characters.count > 1 else {
+    guard synthesizedReplacementIsSpaced(characterCount: text.count, delaySeconds: delaySeconds)
+    else {
       return [SynthesizedReplacementStep(text: text, replacesExistingText: true)]
     }
-    return characters.enumerated().map { index, character in
+    return Array(text).enumerated().map { index, character in
       SynthesizedReplacementStep(
         text: String(character),
         replacesExistingText: index == 0
       )
+    }
+  }
+
+  /// Whether a replacement is posted one character per synthesize call, `delaySeconds` apart,
+  /// rather than as one burst.
+  static func synthesizedReplacementIsSpaced(characterCount: Int, delaySeconds: Double) -> Bool {
+    delaySeconds > 0 && characterCount > 1
+  }
+
+  /// What a synthesized burst costs in wall clock, and the ceiling it has to fit inside before the
+  /// first character is posted. `synthesizedReplacementSteps` decides how a text is posted; this
+  /// decides whether the runner may start posting it at all.
+  enum SynthesizedDeliveryBudget {
+    /// Seconds between two characters of one synthesized burst.
+    static var characterInterval: TimeInterval {
+      1.0 / Double(RunnerSynthesizedTextEntry.typingSpeedCharactersPerSecond())
+    }
+
+    /// Seconds the plan spends posting: each synthesize call types its characters at the pace and
+    /// pays its overhead, a spaced plan sleeps `delaySeconds` between two calls, and a plan that
+    /// peels one character as a warmup (`typeWarmup`) pays one more call and the wait before the
+    /// rest is posted. That wait is one poll here because the caller that asks has no element to
+    /// read the warmup character back from, so `waitForWarmupValue` has no value to wait for.
+    static func projectedSeconds(
+      textLength: Int,
+      delaySeconds: TimeInterval,
+      typeWarmup: Bool = false
+    ) -> TimeInterval {
+      let spaced = synthesizedReplacementIsSpaced(characterCount: textLength, delaySeconds: delaySeconds)
+      let warmupSplit = typeWarmup && textLength > 1 && !spaced
+      let calls = spaced ? textLength : (warmupSplit ? 2 : 1)
+      return Double(textLength) * characterInterval
+        + Double(calls) * TextEntryTiming.synthesizeCallOverhead
+        + Double(calls - 1) * delaySeconds
+        + (warmupSplit ? TextEntryTiming.pollInterval : 0)
+    }
+
+    static func exceeds(
+      textLength: Int,
+      delaySeconds: TimeInterval,
+      typeWarmup: Bool = false
+    ) -> Bool {
+      projectedSeconds(textLength: textLength, delaySeconds: delaySeconds, typeWarmup: typeWarmup)
+        > TextEntryTiming.synthesizedDeliveryCeiling
+    }
+
+    /// Longest text `exceeds` admits at `delaySeconds`, which is what the refusal tells the caller.
+    static func maxTextLength(delaySeconds: TimeInterval) -> Int {
+      var length = 1
+      while !exceeds(textLength: length + 1, delaySeconds: delaySeconds) {
+        length += 1
+      }
+      return length
     }
   }
 
@@ -99,6 +152,27 @@ extension RunnerTests {
   ) -> SynthesizedReplacementRouteOutcome {
 #if os(iOS)
     NSLog("AGENT_DEVICE_RUNNER_TEXT_ENTRY_ROUTE route=synthesized-first-responder-replacement")
+    if SynthesizedDeliveryBudget.exceeds(
+      textLength: request.text.count,
+      delaySeconds: request.delaySeconds
+    ) {
+      NSLog(
+        "AGENT_DEVICE_RUNNER_TEXT_ENTRY_ROUTE route=synthesized-first-responder-replacement "
+          + "reason=delivery-budget-refused chars=%d budgetChars=%d",
+        request.text.count,
+        SynthesizedDeliveryBudget.maxTextLength(delaySeconds: request.delaySeconds)
+      )
+      return .completed(
+        TextEntryResult(
+          verified: nil,
+          repaired: false,
+          expectedText: request.text,
+          observedText: nil,
+          textEntryRoute: "synthesized-first-responder-replacement",
+          failure: .synthesisBudgetExceeded
+        )
+      )
+    }
     let steps = Self.synthesizedReplacementSteps(
       text: request.text,
       delaySeconds: request.delaySeconds
