@@ -80,6 +80,9 @@ const hasRunnerBusyCode: RunnerErrorDetailsMatch = (details) =>
  */
 const hasDevToolsSecurityStatus: RunnerErrorDetailsMatch = (details) =>
   typeof details.devToolsSecurityStatus === 'string';
+/** The failed xcodebuild phase resolved its destination in a scoped simulator set. */
+const hasSimulatorSetPath: RunnerErrorDetailsMatch = (details) =>
+  typeof details.simulatorSetPath === 'string';
 const hasUsbmuxDeviceUnattached: RunnerErrorDetailsMatch = (details) =>
   details.usbmuxDeviceAttached === false;
 const hasRunnerConnectFailureReason =
@@ -157,6 +160,7 @@ export const RUNNER_STARTUP_FAILURE_REASONS = [
   'signing_provisioning_profile_missing',
   'signing_unspecified',
   'devtools_security_developer_mode_disabled',
+  'simulator_set_destination_not_found',
   ...RUNNER_DEVICE_READINESS_FAILURE_REASONS,
   'build_failed_unclassified',
 ] as const;
@@ -329,6 +333,20 @@ export const RUNNER_ERROR_RULES: readonly RunnerErrorRule[] = [
   // builder — it classifies a runner that DID build and then exited early, whose reason axis is the
   // `BootFailureReason` `classifyBootFailure` already returns, and a build that never produced a
   // binary has no boot to classify.
+  {
+    // A scoped set's simulator is reachable to xcodebuild only through `-DVTSimulatorSetLocation`, a
+    // private Xcode user default; an Xcode that stops reading it finds no simulator with that id.
+    reason: 'simulator_set_destination_not_found',
+    match: {
+      toolTextIncludesAll: ['matching the provided destination specifier'],
+      details: hasSimulatorSetPath,
+    },
+    verdicts: {},
+    buildFailure: {
+      reason: 'simulator_set_destination_not_found',
+      hint: 'Check that the simulator still exists in the --ios-simulator-device-set this error names (`xcrun simctl --set <set> list devices`). If it does, the Xcode this error names no longer honors -DVTSimulatorSetLocation, so use a simulator in the default set.',
+    },
+  },
   {
     reason: 'bundle_identifier_registration_failed',
     match: { toolTextIncludesAll: ['failed registering bundle identifier'] },

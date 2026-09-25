@@ -15,13 +15,10 @@ import {
   makeRunnerSession,
   runnerError,
   runnerResponse,
-  redirectHandle,
-  redirectRelease,
 } from './runner-session-fixtures.ts';
 import { mkdtempForTestSync } from './tmp-dir.ts';
 
 const {
-  mockAcquireXcodebuildSimulatorSetRedirect,
   mockCleanupTempFile,
   mockEnsureXctestrunArtifact,
   mockGetFreePort,
@@ -40,7 +37,6 @@ const {
   mockSignalProcessGroupBestEffort,
   mockWaitForRunner,
 } = vi.hoisted(() => ({
-  mockAcquireXcodebuildSimulatorSetRedirect: vi.fn(),
   mockCleanupTempFile: vi.fn(),
   mockEnsureXctestrunArtifact: vi.fn(),
   mockGetFreePort: vi.fn(),
@@ -110,7 +106,6 @@ vi.mock('../runner-xctestrun.ts', async () => {
     await vi.importActual<typeof import('../runner-xctestrun.ts')>('../runner-xctestrun.ts');
   return {
     ...actual,
-    acquireXcodebuildSimulatorSetRedirect: mockAcquireXcodebuildSimulatorSetRedirect,
     ensureXctestrunArtifact: mockEnsureXctestrunArtifact,
     prepareXctestrunWithEnv: mockPrepareXctestrunWithEnv,
     resolveExpectedRunnerCacheMetadata: mockResolveExpectedRunnerCacheMetadata,
@@ -191,7 +186,6 @@ beforeEach(async () => {
   });
   mockResolveExpectedRunnerCacheMetadata.mockReturnValue({ schemaVersion: 1 });
   mockResolveRunnerDerivedPath.mockReturnValue('/tmp/derived');
-  mockAcquireXcodebuildSimulatorSetRedirect.mockResolvedValue(redirectHandle);
   mockRunCmdBackground.mockReturnValue(makeBackgroundRunner(4242));
   mockRunAppleToolCommand.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
   mockIsProcessAlive.mockReturnValue(true);
@@ -340,7 +334,6 @@ test('runner session emits XCTest startup progress only after a runner rebuild',
     xctestrunPath: '/tmp/session-runner.xctestrun',
     jsonPath: '/tmp/session-runner.json',
   });
-  mockAcquireXcodebuildSimulatorSetRedirect.mockResolvedValue(redirectHandle);
   mockRunCmdBackground.mockReturnValue(makeBackgroundRunner(4242));
   mockWaitForRunner.mockResolvedValue(runnerResponse({ uptimeMs: 1 }));
 
@@ -1069,7 +1062,6 @@ test('runner session restarts dead runner without graceful shutdown', async () =
     ['/tmp/session-runner.xctestrun'],
     ['/tmp/session-runner.json'],
   ]);
-  assert.equal(redirectRelease.mock.calls.length, 1);
 });
 
 test('runner session stop kills only owned stale xcodebuild runner processes without in-memory session', async () => {
@@ -1108,7 +1100,6 @@ test('runner session abort removes owned lease for in-memory sessions', async ()
     ['/tmp/session-runner.xctestrun'],
     ['/tmp/session-runner.json'],
   ]);
-  assert.equal(redirectRelease.mock.calls.length, 1);
 });
 
 function isXcodebuildPkillCall(call: unknown[]): boolean {
@@ -1150,7 +1141,6 @@ test('runner session invalidation skips graceful shutdown and removes stale sess
     ['/tmp/session-runner.xctestrun'],
     ['/tmp/session-runner.json'],
   ]);
-  assert.equal(redirectRelease.mock.calls.length, 1);
   assert.equal(readRunnerSessionLiveness(device.id), null);
 });
 
