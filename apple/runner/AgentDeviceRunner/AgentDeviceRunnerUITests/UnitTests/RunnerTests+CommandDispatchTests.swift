@@ -143,6 +143,99 @@ extension RunnerTests {
     }
   }
 
+  /// Pins the `.noApp` preparation contract in `prepareActiveCommandContext`: a presented host is
+  /// served in place with its surface disclosed, and with nothing presented the standing cached
+  /// target is served rather than one resolved from the request. The request names a bundle the
+  /// session never bound because that is the only shape separating the two targets — when the
+  /// request agrees with the cache, both answers name the same app. The override is authoritative
+  /// for every registered host while set, so no live state is read; the probe's registry walk and
+  /// foreground condition stay the production ones. Deleting the presented arm fails the first
+  /// block, and resolving the target from the request instead of the cache fails the last.
+  @MainActor
+  func testNoAppCommandStillServesAPresentedSurfaceInPlaceAndOtherwiseTheStandingTarget() throws {
+    let cachedBundleId = "com.example.session"
+    let requestedBundleId = "com.example.requested-but-never-bound"
+    defer {
+      presentedSystemSurfaceForegroundOverrideForTesting = nil
+      invalidateCachedTarget(reason: "unit_test_cleanup")
+    }
+
+    let host = try XCTUnwrap(SystemSurfaceHostRegistry.hosts.first)
+    let screenshot = try runnerCommandFixture(
+      #"{"command":"screenshot","commandId":"capture-1","appBundleId":"\#(requestedBundleId)"}"#
+    )
+    mainOwned.app = app
+    mainOwned.bundleId = cachedBundleId
+
+    presentedSystemSurfaceForegroundOverrideForTesting = [host.bundleId]
+    guard case .context(let presented) = prepareActiveCommandContext(command: screenshot) else {
+      return XCTFail("screenshot must be prepared, not refused")
+    }
+    XCTAssertEqual(
+      presented.systemSurface,
+      host,
+      "a capture prepared under a presented surface must name that surface as its prepared subject (#2438)"
+    )
+    XCTAssertFalse(
+      presented.app === app,
+      "the prepared subject is the presented host, not the standing session target"
+    )
+    XCTAssertFalse(
+      presented.app === springboard,
+      "a presented surface is served in place, never through SpringBoard"
+    )
+    XCTAssertNil(pendingTargetActivation, "serving a surface in place may not record an activation")
+    XCTAssertEqual(
+      mainOwned.bundleId,
+      cachedBundleId,
+      "serving a surface in place may not rebind the session target"
+    )
+
+    // A second host reported instead of the first: an arm that returned the registry's first entry
+    // rather than walking it would pass everything above and fail here. The total override makes the
+    // first host's not-foreground answer pinned too, not merely observed.
+    let secondHost = SystemSurfaceHostRegistry.hosts[1]
+    presentedSystemSurfaceForegroundOverrideForTesting = [secondHost.bundleId]
+    guard case .context(let other) = prepareActiveCommandContext(command: screenshot) else {
+      return XCTFail("screenshot must be prepared, not refused")
+    }
+    XCTAssertEqual(
+      other.systemSurface,
+      secondHost,
+      "the probe must serve the host that is reported foreground, not the registry's first entry"
+    )
+
+    // Both reported: the registry's own order decides, because live state cannot be told to present
+    // two hosts at once. Totality is what keeps the block's answer free of what the sim happens to
+    // report for any host a future registry entry adds.
+    presentedSystemSurfaceForegroundOverrideForTesting = [host.bundleId, secondHost.bundleId]
+    guard case .context(let both) = prepareActiveCommandContext(command: screenshot) else {
+      return XCTFail("screenshot must be prepared, not refused")
+    }
+    XCTAssertEqual(
+      both.systemSurface,
+      host,
+      "with every host foreground the probe must serve them in registry order"
+    )
+
+    // The other half, with nothing presented — an empty total override, so this half pins the
+    // hosts' answers too. Without this the arm could pass by serving a surface that is not there.
+    presentedSystemSurfaceForegroundOverrideForTesting = []
+    guard case .context(let standing) = prepareActiveCommandContext(command: screenshot) else {
+      return XCTFail("screenshot must be prepared, not refused")
+    }
+    XCTAssertNil(
+      standing.systemSurface,
+      "no surface is presented, so nothing may be disclosed as one"
+    )
+    XCTAssertTrue(
+      standing.app === app,
+      "naming another bundle is no licence to point the observation away from the standing target"
+    )
+    XCTAssertNil(pendingTargetActivation)
+    XCTAssertEqual(mainOwned.bundleId, cachedBundleId, "preparing a capture binds nothing")
+  }
+
   @MainActor
   func testSkipAppActivationPreflightIncludesForegroundCachedCoordinateOnlyTaps() throws {
     app.launch()

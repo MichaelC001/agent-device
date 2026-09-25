@@ -44,8 +44,15 @@ enum CommandType: String, Codable, CaseIterable {
 /// decides whether a stopped app is started, so it is declared per command rather than inferred
 /// from whether the command may be replayed (#2890).
 enum CommandLaunchPolicy: Equatable {
-  /// Never brings an app forward: the command answers from the runner's own capture and state, or
-  /// drives the runner's own lifecycle.
+  /// Preparation brings no app forward and binds no target: the command answers from the runner's own
+  /// capture and state, or drives the runner's own lifecycle, so it is served the standing cached
+  /// target. A surface that is genuinely presented is served in place instead, which is the prepared
+  /// contract those commands had before the launch-policy axis (#2438). No member's response body
+  /// reads the prepared target or the disclosed surface: the names a `.noApp` command answers from
+  /// are its own capture and state, or the bundle it names — which is why neither prepared fact
+  /// needs a consumer here, and why a proof of this arm is a preparation test. Scoped to
+  /// preparation either way: a command body may still go to the app it names, as macOS `screenshot`
+  /// does.
   case noApp
   /// Answers from the surface that already has focus, where activating an app would cancel exactly
   /// what the command is about: an in-place system surface, or a press that belongs to the system.
@@ -54,8 +61,10 @@ enum CommandLaunchPolicy: Equatable {
   case presentedSurface
   /// Refuses with `APP_NOT_RUNNING` rather than starting a stopped app, because `activate()` on a
   /// not-running app is a bare launch (#2852). The refusal is about a session app, so it answers an
-  /// explicitly requested bundle id on the platform that can read that app's state; a request naming
-  /// no app has no session app to refuse.
+  /// explicitly requested bundle id; a request naming no app has no session app to refuse. It is
+  /// enforced on iOS only: `notRunningRefusal` is `#if os(iOS)`, the platform that can read an app's
+  /// state without launching it. Off iOS these commands keep the activation route they had before
+  /// this axis existed, and no refusal can occur there.
   case existingApp
   /// Brings the app forward, which bare-launches it when it is not running.
   case mayLaunch
@@ -126,7 +135,8 @@ fileprivate extension CommandTraits {
 
   /// Selector resolution is an observation: it refuses a stopped app instead of bare-launching it,
   /// and the runner still must not replay it after session invalidation. Those are two facts about
-  /// one command, which is why they are two declarations (#2890).
+  /// one command, which is why they are two declarations (#2890). The refusal is the iOS-enforced
+  /// half: off iOS a selector read of a stopped app still activates it, as it did before this axis.
   static let selectorResolution = CommandTraits(
     launchPolicy: .existingApp,
     convertsRecordedFailure: true
@@ -157,11 +167,19 @@ fileprivate extension CommandTraits {
 extension CommandTraits {
   /// The commands that own the remembered text-entry witness instead of invalidating it: `tap`
   /// records it (and clears it where a tap demonstrably did not land), and `type` reads the one this
-  /// command relies on. Everywhere else on the prepared command path it is having a mutation to
-  /// prove that makes a remembered tap stale, so clearing is derived from `convertsRecordedFailure`
-  /// together with this set at that one consumer — not declared as a fifth fact, which the commands
-  /// answered before that path would have carried without ever being read (#2890 review).
+  /// command relies on.
   static let textEntryWitnessOwners: Set<CommandType> = [.tap, .type]
+}
+
+extension Command {
+  /// Whether arriving at the prepared command path invalidates a remembered text-entry tap. Not a
+  /// fifth trait: everywhere but the two owner commands, it is having a mutation to prove that makes
+  /// the witness stale, so this reads `convertsRecordedFailure` and that set rather than declaring a
+  /// fact no command would answer for itself (#2890 review). `executeOnMainPrepared` is its only
+  /// consumer, and the exhaustive table test pins the answer for every command.
+  var invalidatesRememberedTextEntryTap: Bool {
+    traits.convertsRecordedFailure && !CommandTraits.textEntryWitnessOwners.contains(command)
+  }
 }
 
 struct Command: Codable {

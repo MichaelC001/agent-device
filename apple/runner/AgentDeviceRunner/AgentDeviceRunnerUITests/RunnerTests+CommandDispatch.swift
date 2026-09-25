@@ -468,9 +468,14 @@ extension RunnerTests {
     }
     switch command.traits.launchPolicy {
     case .noApp:
-      // Answers from the runner's own capture and state, so the target is resolved exactly as it
-      // stands.
-      return .context(ActiveCommandContext(app: resolveAppWithoutActivation(command: command)))
+      // Serves a genuinely presented surface in place with its provenance, else the standing cached
+      // target, activating nothing and binding nothing (#2438); `Command.traits` is the member list.
+      if let presented = presentedSystemSurfaceHost() {
+        return .context(ActiveCommandContext(app: presented.app, systemSurface: presented.host))
+      }
+      // The standing target, not the request's bundle id: this route never resolves a bundle it has
+      // not already bound, which is what keeps an observation from deciding which app it is about.
+      return .context(ActiveCommandContext(app: mainOwned.app ?? app))
     case .presentedSurface:
       // The command is about the surface that already has focus; activating an app under it would
       // cancel exactly what the command is about.
@@ -482,9 +487,11 @@ extension RunnerTests {
       // axis found it on.
       return prepareActivatedTarget(command: command)
 #endif
-    case .existingApp, .mayLaunch:
-      // Asked only where activation is on the table: the bypass decides by querying the cached
-      // target's state, and a command that may bring nothing forward has nothing for it to settle.
+    case .existingApp:
+      // No request-dependent bypass here: it decides by querying the cached target's state, and a
+      // command that may bring nothing forward has nothing for it to settle.
+      return prepareActivatedTarget(command: command)
+    case .mayLaunch:
       if shouldSkipAppActivationPreflight(command) {
         // The one request-dependent bypass: a coordinate-only synthesized tap whose cached target is
         // already foreground needs nothing brought forward.
@@ -581,15 +588,29 @@ extension RunnerTests {
   private func presentedSystemSurfaceHost() -> (host: SystemSurfaceHost, app: XCUIApplication)? {
 #if os(iOS)
     for host in SystemSurfaceHostRegistry.hosts {
-      let candidate = XCUIApplication(bundleIdentifier: host.bundleId)
-      if candidate.state == .runningForeground {
-        return (host, candidate)
+      if systemSurfaceHostState(host) == .runningForeground {
+        return (host, XCUIApplication(bundleIdentifier: host.bundleId))
       }
     }
     return nil
 #else
     return nil
 #endif
+  }
+
+  /// Whether a registered host is on screen. A registered host is an out-of-process service that only
+  /// comes up because some app presented it, and `open` refuses to launch one, so no in-bundle test
+  /// can make the system report one foreground; the override answers that one question, and when it
+  /// is set it is authoritative for every registered host — members are foreground, non-members are
+  /// not — so a test pins the whole registry walk rather than the live state of what it left out.
+  /// The registry order and the foreground condition above stay the production ones.
+  private func systemSurfaceHostState(_ host: SystemSurfaceHost) -> XCUIApplication.State {
+    #if AGENT_DEVICE_RUNNER_UNIT_TESTS
+    if let override = presentedSystemSurfaceForegroundOverrideForTesting {
+      return override.contains(host.bundleId) ? .runningForeground : .notRunning
+    }
+    #endif
+    return XCUIApplication(bundleIdentifier: host.bundleId).state
   }
 
   func currentXCTestFailureCount() -> Int {
