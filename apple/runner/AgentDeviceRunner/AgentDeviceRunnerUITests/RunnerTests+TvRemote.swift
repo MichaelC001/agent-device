@@ -52,13 +52,7 @@ extension RunnerTests {
   }
 
   func elementHasFocus(_ element: XCUIElement) -> Bool {
-    var focused = false
-    _ = RunnerObjCExceptionCatcher.catchException({
-      if let value = (element as NSObject).value(forKey: "hasFocus") as? Bool {
-        focused = value
-      }
-    })
-    return focused
+    return focusBool(element as NSObject)
   }
 
   func activateElement(

@@ -417,13 +417,27 @@ extension RunnerTests {
   }
 
   private func snapshotHasFocus(_ snapshot: XCUIElementSnapshot) -> Bool {
-    var focused = false
+    return focusBool(snapshot as! NSObject)
+  }
+
+  /// Either focus is focus. `hasFocus` is the focus engine's answer (tvOS, keyboard navigation);
+  /// the field a software keyboard is typing into holds `hasKeyboardFocus` instead, which the
+  /// text-entry readiness check already consults. Both an element and its snapshot answer the two
+  /// keys through KVC, so one reader serves the XCTest producers (recursive tree, query sweep,
+  /// collapsed tabs); a key the object lacks reads as false. The private-AX bridge is not among
+  /// them: the AX server declares no keyboard-focus attribute, so it reads `hasFocus` alone.
+  func focusBool(_ object: NSObject) -> Bool {
+    return kvcBool(object, forKey: "hasKeyboardFocus") || kvcBool(object, forKey: "hasFocus")
+  }
+
+  private func kvcBool(_ object: NSObject, forKey key: String) -> Bool {
+    var result = false
     _ = RunnerObjCExceptionCatcher.catchException({
-      if let value = (snapshot as! NSObject).value(forKey: "hasFocus") as? Bool {
-        focused = value
+      if let value = object.value(forKey: key) as? Bool {
+        result = value
       }
     })
-    return focused
+    return result
   }
 
   private func snapshotIsSelected(_ snapshot: XCUIElementSnapshot) -> Bool {
