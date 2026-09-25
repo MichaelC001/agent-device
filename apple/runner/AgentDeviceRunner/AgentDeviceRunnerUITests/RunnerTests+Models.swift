@@ -39,84 +39,128 @@ enum CommandType: String, Codable, CaseIterable {
   case shutdown
 }
 
+/// What the runner may do about a command whose app is not running. This is the only fact that
+/// decides whether a stopped app is started, so it is declared per command rather than inferred
+/// from whether the command may be replayed (#2890).
+enum CommandLaunchPolicy: Equatable {
+  /// Never brings an app forward: the command answers from the runner's own capture and state, or
+  /// drives the runner's own lifecycle.
+  case noApp
+  /// Answers from the surface that already has focus, where activating an app would cancel exactly
+  /// what the command is about: an in-place system surface, or a press that belongs to the system.
+  /// Only iOS registers surfaces that can be served in place, and
+  /// `prepareActiveCommandContext` is where that one platform exception is written.
+  case presentedSurface
+  /// Refuses with `APP_NOT_RUNNING` rather than starting a stopped app, because `activate()` on a
+  /// not-running app is a bare launch (#2852). The refusal is about a session app, so it answers an
+  /// explicitly requested bundle id on the platform that can read that app's state; a request naming
+  /// no app has no session app to refuse.
+  case existingApp
+  /// Brings the app forward, which bare-launches it when it is not running.
+  case mayLaunch
+}
+
 /// Runner command traits — see CONTEXT.md ("Runner command traits").
 ///
-/// Single source of truth for how the runner classifies a command across three
-/// independent axes, replacing the three hand-maintained switches that used to live
-/// in RunnerTests+Lifecycle.swift (isInteractionCommand / isReadOnlyCommand /
-/// isRunnerLifecycleCommand). The classification is load-bearing for ADR-0002 session
-/// invalidation: `readOnly` gates the retry that nulls currentApp/currentBundleId.
+/// Single source of truth for how the runner classifies one request. Each fact names the one
+/// decision that reads it, so opting a command out of a decision is a declaration about that
+/// decision alone and cannot silently move another. `Command.traits` resolves them against the
+/// request, so a payload-dependent fact is settled once instead of re-read per consumer.
+///
+/// Commands that decide alike share one named group instead of repeating a literal per fact, and a
+/// group spells only the facts that reach its commands; a fact an arm answers before reading falls
+/// to the initializer's default. The completeness test pins every fact on every command either way,
+/// so a default that stopped matching its consumer is a red row rather than a silent one (#2890
+/// review). The groups are file-private so a test of the classification has to spell the facts
+/// rather than re-derive them from the same names.
+///
+/// The classification is load-bearing for ADR-0002 session invalidation: `retryOnSessionLoss` gates
+/// the retry that nulls currentApp/currentBundleId, and `launchPolicy` — never the retry fact —
+/// decides whether a stopped app is brought up.
 struct CommandTraits {
   /// Whether the command needs the foreground-guard + stabilization preflight before running.
   let isInteraction: Bool
   /// Whether the command is eligible for the session-invalidating retry.
-  /// `.conditional` is resolved against the request (alert is read-only only for its `get` action).
-  let readOnly: ReadOnly
-  /// Whether the command skips the app-activation preflight entirely.
-  let isLifecycle: Bool
+  let retryOnSessionLoss: Bool
+  /// What the runner may do when the command's app is not running. The one fact with no default: no
+  /// command inherits a launch answer from how it was classified for anything else.
+  let launchPolicy: CommandLaunchPolicy
+  /// Whether an XCTest-recorded failure during this command turns its own healthy response into a
+  /// failure and invalidates the session. That conversion is the only evidence a mutation with no
+  /// settle and no post-action observation ever landed, while a command that reports the runner's own
+  /// state or drives its lifecycle has no user-visible mutation to prove.
+  let convertsRecordedFailure: Bool
 
-  enum ReadOnly {
-    case always
-    case never
-    /// Alert-only today. Resolved in `isReadOnlyCommand` with alert's rule (read-only for the
-    /// `get` action, mutating otherwise). A new `.conditional` command would inherit that rule
-    /// until the resolver is generalized — give it explicit handling there if its semantics differ.
-    case conditional
+  init(
+    isInteraction: Bool = false,
+    retryOnSessionLoss: Bool = false,
+    launchPolicy: CommandLaunchPolicy,
+    convertsRecordedFailure: Bool = false
+  ) {
+    self.isInteraction = isInteraction
+    self.retryOnSessionLoss = retryOnSessionLoss
+    self.launchPolicy = launchPolicy
+    self.convertsRecordedFailure = convertsRecordedFailure
   }
 }
 
-extension CommandType {
-  /// The classification for this command. Exhaustive by construction: a new CommandType
-  /// cannot compile without being classified here, so commands can no longer silently drift
-  /// out of classification the way the parallel switches allowed.
-  var traits: CommandTraits {
-    switch self {
-    // Interaction commands: require the foreground-guard + stabilization preflight.
-    // keyboardReturn is the sibling of keyboardDismiss (missing from the historical switch —
-    // drift the table now prevents). .scroll is the fused frame-resolve + drag scroll; same
-    // classification as .drag. .desktopScroll is the macOS frame-resolve + wheel event sibling.
-    // .sequence is the fused multi-step gesture batch.
-    case .tap, .longPress, .drag, .remotePress, .type, .swipe, .scroll, .desktopScroll,
-         .backInApp, .backSystem, .rotate, .appSwitcher,
-         .keyboardDismiss, .keyboardReturn, .sequence, .gesture:
-      return CommandTraits(isInteraction: true, readOnly: .never, isLifecycle: false)
+fileprivate extension CommandTraits {
+  /// Element interactions: bring the session app forward, run the preflight, and owe the
+  /// recorded-failure conversion for whatever the gesture did.
+  static let interaction = CommandTraits(
+    isInteraction: true,
+    launchPolicy: .mayLaunch,
+    convertsRecordedFailure: true
+  )
 
-    // Read-only reads: eligible for the session-invalidating retry.
-    case .findText, .readText, .snapshot, .gestureViewport:
-      return CommandTraits(isInteraction: false, readOnly: .always, isLifecycle: false)
+  /// Mutations the runner performs without the element-interaction preflight. NOTE: `mouseClick`
+  /// stays non-interaction for now — it is macOS-only and the foreground guard interacts with
+  /// bespoke macOS activation, so classifying it needs a macOS smoke check first (tracked as a
+  /// follow-up).
+  static let appMutation = CommandTraits(launchPolicy: .mayLaunch, convertsRecordedFailure: true)
 
-    // Screenshot is both a read and a runner-lifecycle command (skips app-activation preflight).
-    case .screenshot:
-      return CommandTraits(isInteraction: false, readOnly: .always, isLifecycle: true)
+  /// Reads of the session app: replayable after session invalidation, and refused rather than
+  /// answered by starting the app.
+  static let appRead = CommandTraits(retryOnSessionLoss: true, launchPolicy: .existingApp)
 
-    // Alert is read-only only for its `get` action (resolved by isReadOnlyCommand).
-    case .alert:
-      return CommandTraits(isInteraction: false, readOnly: .conditional, isLifecycle: false)
+  /// Selector resolution is an observation: it refuses a stopped app instead of bare-launching it,
+  /// and the runner still must not replay it after session invalidation. Those are two facts about
+  /// one command, which is why they are two declarations (#2890).
+  static let selectorResolution = CommandTraits(
+    launchPolicy: .existingApp,
+    convertsRecordedFailure: true
+  )
 
-    // Runner-lifecycle commands: skip the app-activation preflight.
-    case .recordStop, .uptime, .terminate, .targetReset, .shutdown:
-      return CommandTraits(isInteraction: false, readOnly: .never, isLifecycle: true)
+  /// Reads the runner answers from its own capture and state, so preparation never brings an app
+  /// forward; a capture aimed at an app still observes that app while it executes.
+  static let runnerCaptureRead = CommandTraits(retryOnSessionLoss: true, launchPolicy: .noApp)
 
-    // A hardware press mutates, is not an element interaction, and is not runner-lifecycle. It stays
-    // outside the lifecycle group because that flag also exempts a command from the recorded-failure
-    // conversion, and this command has no settle or post-action observation, so that conversion is
-    // the only evidence the press landed. It skips the app-activation preflight on its own terms in
-    // `shouldSkipAppActivationPreflight`, the way `.alert` does (#2699, #2702 review).
-    case .actionButton:
-      return CommandTraits(isInteraction: false, readOnly: .never, isLifecycle: false)
+  /// The runner's own lifecycle: no session app is brought forward, and no mutation is proven.
+  static let runnerLifecycle = CommandTraits(launchPolicy: .noApp)
 
-    case .status:
-      return CommandTraits(isInteraction: false, readOnly: .always, isLifecycle: true)
+  /// Commands hosted by the surface that already has focus, which no activation may cancel. A
+  /// hardware press belongs to the system rather than to the session app, and an alert answers from
+  /// the modal where it sits; both mutate.
+  static let presentedSurfaceMutation = CommandTraits(
+    launchPolicy: .presentedSurface,
+    convertsRecordedFailure: true
+  )
 
-    // Normal preflight, not retried.
-    // NOTE: mouseClick stays non-interaction for now — it is macOS-only and the foreground
-    // guard interacts with bespoke macOS activation, so classifying it needs a macOS smoke
-    // check first (tracked as a follow-up). Also preserved: querySelector is NOT read-only;
-    // recordStart is NOT a lifecycle command; home/alert remain non-interaction by design.
-    case .mouseClick, .querySelector, .home, .recordStart, .activate:
-      return CommandTraits(isInteraction: false, readOnly: .never, isLifecycle: false)
-    }
-  }
+  /// `alert get` changes nothing, so it is the one alert action that may be replayed.
+  static let presentedSurfaceQuery = CommandTraits(
+    retryOnSessionLoss: true,
+    launchPolicy: .presentedSurface
+  )
+}
+
+extension CommandTraits {
+  /// The commands that own the remembered text-entry witness instead of invalidating it: `tap`
+  /// records it (and clears it where a tap demonstrably did not land), and `type` reads the one this
+  /// command relies on. Everywhere else on the prepared command path it is having a mutation to
+  /// prove that makes a remembered tap stale, so clearing is derived from `convertsRecordedFailure`
+  /// together with this set at that one consumer — not declared as a fifth fact, which the commands
+  /// answered before that path would have carried without ever being read (#2890 review).
+  static let textEntryWitnessOwners: Set<CommandType> = [.tap, .type]
 }
 
 struct Command: Codable {
@@ -157,6 +201,47 @@ struct Command: Codable {
   let inlineScreenshot: Bool?
   let synthesized: Bool?
   let steps: [SequenceStep]?
+}
+
+extension Command {
+  /// How the runner classifies this request. Exhaustive by construction: a new CommandType cannot
+  /// compile without choosing a group, and the facts that depend on the payload are settled here
+  /// rather than re-read by each consumer.
+  var traits: CommandTraits {
+    switch command {
+    // The gesture families, each classified with what it is built from. keyboardReturn is the
+    // sibling of keyboardDismiss (missing from the historical switch — drift the table now
+    // prevents). .scroll is the fused frame-resolve + drag scroll and .desktopScroll the macOS
+    // frame-resolve + wheel event sibling of .drag; .sequence is the fused multi-step batch.
+    case .tap, .type, .longPress, .drag, .remotePress, .swipe, .scroll, .desktopScroll,
+         .backInApp, .backSystem, .rotate, .appSwitcher,
+         .keyboardDismiss, .keyboardReturn, .sequence, .gesture:
+      return .interaction
+
+    case .findText, .readText, .snapshot, .gestureViewport:
+      return .appRead
+
+    case .screenshot, .status:
+      return .runnerCaptureRead
+
+    case .alert:
+      return (action ?? "get").lowercased() == "get"
+        ? .presentedSurfaceQuery
+        : .presentedSurfaceMutation
+
+    case .recordStop, .uptime, .terminate, .targetReset, .shutdown:
+      return .runnerLifecycle
+
+    case .actionButton:
+      return .presentedSurfaceMutation
+
+    case .querySelector:
+      return .selectorResolution
+
+    case .mouseClick, .home, .recordStart, .activate:
+      return .appMutation
+    }
+  }
 }
 
 enum ScrollReleaseBehavior: String, Codable {
@@ -385,7 +470,7 @@ struct SnapshotQualityPayload: Codable {
   }
 }
 
-/// A runner failure the read-only retry may recover from by re-resolving the target.
+/// A runner failure the session-loss retry may recover from by re-resolving the target.
 enum RetryableResponseFailure: Equatable {
   case targetAppUnavailable
 }

@@ -29,8 +29,8 @@ extension RunnerTests {
 
   func testXCTestRecordedFailureResponseFailsActionButtonSuccess() throws {
     // The Action Button press carries no settle and no post-action observation, so this conversion is
-    // the only evidence the press landed. That is why the press is not classified runner-lifecycle:
-    // `isLifecycle` would silence the conversion here (#2699, #2702 review).
+    // the only evidence the press landed. That is why the press declares `convertsRecordedFailure`
+    // even though its launch policy keeps it out of the app-activation preflight (#2699, #2702).
     let command = try runnerCommandFixture(#"{"command":"actionButton","commandId":"action-button-1"}"#)
     let response = Response(ok: true, data: DataPayload(message: "actionButton"))
 
@@ -88,6 +88,59 @@ extension RunnerTests {
     XCTAssertFalse(snapshotXCTestPenaltyWarmupExemption.isPending)
   }
 
+  /// A `.presentedSurface` command is the activation bypass itself: it resolves its target as it
+  /// stands, leaves a stopped app stopped, and binds nothing, so the next read of that app is refused
+  /// instead of answered by a bare launch (#2890). This is where the table's launch policy is proved
+  /// on the platform that serves surfaces in place.
+  func testPresentedSurfaceCommandLeavesAStoppedAppStoppedAndUnbound() throws {
+    let unstarted = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+    defer { invalidateCachedTarget(reason: "unit_test_cleanup") }
+    for request in [
+      #"{"command":"actionButton","commandId":"press-1","appBundleId":"com.apple.Preferences"}"#,
+      #"{"command":"alert","action":"get","commandId":"alert-1","appBundleId":"com.apple.Preferences"}"#
+    ] {
+      unstarted.terminate()
+      pendingTargetActivation = nil
+      currentApp = nil
+      currentBundleId = nil
+      let command = try runnerCommandFixture(request)
+
+      guard case .context(let prepared) = prepareActiveCommandContext(command: command) else {
+        return XCTFail("\(request) must be prepared, not refused")
+      }
+      // Leaving the app stopped is only half of the bypass. The command must still be served against
+      // the app it names: a hosted alert belongs to that app, and routing the request to SpringBoard
+      // or to the runner's own host app would answer a different screen than the caller asked about —
+      // with nothing launched, so no assertion below would notice. The stopped app is the only target
+      // that reads as `.notRunning`, which is what separates it from every substitute.
+      XCTAssertEqual(
+        prepared.app.state,
+        .notRunning,
+        "\(request) must be prepared against the stopped app it names, not a live surface"
+      )
+      XCTAssertNil(
+        prepared.systemSurface,
+        "\(request) must be served from the named app, not from a surface presented over it"
+      )
+      XCTAssertEqual(
+        unstarted.state,
+        .notRunning,
+        "\(request) may not foreground the app it was told to leave alone"
+      )
+      XCTAssertNil(pendingTargetActivation, "\(request) may not record an activation fact")
+      XCTAssertNil(currentBundleId, "\(request) may not bind a target it never brought forward")
+    }
+
+    let read = try runnerCommandFixture(
+      #"{"command":"snapshot","commandId":"read","appBundleId":"com.apple.Preferences"}"#
+    )
+    guard case .response(let refusal) = prepareActiveCommandContext(command: read),
+      refusal.error?.code == RunnerWireErrorCode.appNotRunning
+    else {
+      return XCTFail("a command that bound no target must leave the next read refused, not launched")
+    }
+  }
+
   func testSkipAppActivationPreflightIncludesForegroundCachedCoordinateOnlyTaps() throws {
     app.launch()
     currentApp = app
@@ -131,17 +184,6 @@ extension RunnerTests {
     currentBundleId = nil
 
     XCTAssertFalse(shouldSkipAppActivationPreflight(coordinateTap))
-  }
-
-  func testActionButtonPressSkipsAppActivationPreflightWithoutBeingRunnerLifecycle() throws {
-    currentApp = nil
-    currentBundleId = nil
-    let press = try runnerCommandFixture(#"{"command":"actionButton","commandId":"action-button-1"}"#)
-
-    // The skip is its own decision, reached without the lifecycle flag that would also drop the
-    // recorded-failure conversion; no cached target and no foreground app is required for it.
-    XCTAssertFalse(isRunnerLifecycleCommand(.actionButton))
-    XCTAssertTrue(shouldSkipAppActivationPreflight(press))
   }
 
   func testPrepareActiveCommandContextRoutesBlockingSystemModalToSpringboard() throws {
@@ -392,14 +434,6 @@ extension RunnerTests {
     XCTAssertFalse(shouldSkipAppActivationPreflight(scroll))
     XCTAssertFalse(shouldSkipAppActivationPreflight(sequence))
   }
-
-  func testSkipAppActivationPreflightIncludesAlertCommands() throws {
-    let alert = try runnerCommandFixture(
-      #"{"command":"alert","commandId":"alert-1","action":"get"}"#
-    )
-
-    XCTAssertTrue(shouldSkipAppActivationPreflight(alert))
-  }
 #endif
 
   func testDispatchReturnsBusyBeforeQueueingMainThreadWork() throws {
@@ -469,7 +503,7 @@ extension RunnerTests {
       drainedCalls += 1
       return recovered
     }
-    XCTAssertEqual(drainedCalls, 2, "with the channel free the read-only retry runs once")
+    XCTAssertEqual(drainedCalls, 2, "with the channel free the session-loss retry runs once")
   }
 
   private func setAbandonedMainThreadWork(_ count: Int) {
