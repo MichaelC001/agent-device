@@ -177,6 +177,94 @@ test('a surface that no longer holds the pre-gesture content answers moved on th
   assert.equal(spy.calls(), 1);
 });
 
+/**
+ * At the end of a list iOS rubber-bands past the edge: the first capture lands mid-bounce with every row
+ * shifted, then the content springs back to exactly the pre-gesture tree (#2884). A baseline that already
+ * showed the end of the content turns that first read into a question, not a verdict.
+ */
+test('a bounce past the edge that springs back is at-edge, not moved', async () => {
+  const { observation, spy } = observe({
+    baseline: baselineOf(screen(0, false)),
+    screens: [screen(-14, false), screen(0, false), screen(0, false)],
+  });
+
+  assert.equal(await observation, 'at-edge');
+  assert.equal(spy.calls(), 3);
+});
+
+/**
+ * The edge question is asked of the scroller under the swipe, through the same selection the edge
+ * verdict uses: among the containers holding the point, the one that still hides content in that
+ * direction. An inner list at its end inside an outer list with more below hands the swipe to the
+ * outer list (that is what the platform does with the gesture), so the rest requirement does not
+ * engage and the first differing read is the movement it produced.
+ */
+test('an inner list at its end inside an outer list with hidden content hands the swipe on', async () => {
+  const outer = {
+    type: 'ScrollView',
+    identifier: 'outer',
+    rect: { x: 0, y: 100, width: 402, height: 760 },
+    hiddenContentBelow: true,
+  } as SnapshotNode;
+  const inner = (rowOffset: number) => [
+    outer,
+    ...screen(rowOffset, false).map((node) =>
+      node.type === 'ScrollView' ? ({ ...node, identifier: 'inner' } as SnapshotNode) : node,
+    ),
+  ];
+  const { observation, spy } = observe({
+    baseline: baselineOf(inner(0)),
+    screens: [inner(-300)],
+  });
+
+  assert.equal(await observation, 'moved');
+  assert.equal(spy.calls(), 1);
+});
+
+/** With no outer list left to take it, the swipe point resolves the inner list and its edge gates the claim. */
+test('an inner list at its end with no outer list left to scroll is gated on rest', async () => {
+  const outerAtEnd = {
+    type: 'ScrollView',
+    identifier: 'outer',
+    rect: { x: 0, y: 100, width: 402, height: 760 },
+  } as SnapshotNode;
+  const inner = (rowOffset: number) => [
+    outerAtEnd,
+    ...screen(rowOffset, false).map((node) =>
+      node.type === 'ScrollView' ? ({ ...node, identifier: 'inner' } as SnapshotNode) : node,
+    ),
+  ];
+  const { observation, spy } = observe({
+    baseline: baselineOf(inner(0)),
+    screens: [inner(-14), inner(0), inner(0)],
+  });
+
+  assert.equal(await observation, 'at-edge');
+  assert.equal(spy.calls(), 3);
+});
+
+test('content that changes at the edge and holds still is still moved', async () => {
+  const { observation, spy } = observe({
+    baseline: baselineOf(screen(0, false)),
+    screens: [screen(-300, false), screen(-300, false)],
+  });
+
+  assert.equal(await observation, 'moved');
+  // The rest requirement costs exactly the one extra read, and only at the edge.
+  assert.equal(spy.calls(), 2);
+});
+
+test('a bounce that never settles at the edge spends the budget and answers unobserved', async () => {
+  const { observation } = observe({
+    baseline: baselineOf(screen(0, false)),
+    screens: (attempt) => screen(attempt % 2 === 0 ? -14 : 0, false),
+    budgetMs: 40,
+  });
+
+  assert.equal(await observation, 'unobserved');
+  assertWithheld('surface-unsettled');
+});
+
 test('a surface that never shifted while the container still hides content refuses with a typed reason', async () => {
   const { observation, spy } = observe({
     baseline: baselineOf(screen(0)),
