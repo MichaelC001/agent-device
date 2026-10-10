@@ -160,6 +160,34 @@ export type OpenAndroidAppOptions = {
   url?: string;
 };
 
+const ANDROID_PACKAGE_NAME = String.raw`[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*`;
+const JAVA_IDENTIFIER = String.raw`[A-Za-z_$][A-Za-z0-9_$]*`;
+
+/**
+ * `am start -n` takes `<package>/<class>`: manifest package segments start with a letter, and class
+ * segments are Java identifiers, `$` included for a nested class. A bare class (`.Main` or `Main`)
+ * is resolved against the launched package.
+ */
+const ANDROID_ACTIVITY_COMPONENT = new RegExp(
+  `^(?:${ANDROID_PACKAGE_NAME}/)?\\.?${JAVA_IDENTIFIER}(?:\\.${JAVA_IDENTIFIER})*$`,
+);
+
+function requireAndroidActivityComponent(activity: string): void {
+  if (ANDROID_ACTIVITY_COMPONENT.test(activity)) return;
+  throw new AppError('INVALID_ARGS', `Invalid Android activity component: ${activity}`, {
+    reason: 'invalid-android-activity-component',
+    activity,
+    hint: 'Pass --activity as <package>/<Class>, .<Class>, or <Class>, using letters, digits, `_`, `.`, and `$`.',
+  });
+}
+
+/** The `am start -n` component for an activity override, refused unless it is a component name. */
+export function androidActivityComponent(packageName: string, activity: string): string {
+  requireAndroidActivityComponent(activity);
+  if (activity.includes('/')) return activity;
+  return `${packageName}/${activity.startsWith('.') ? activity : `.${activity}`}`;
+}
+
 function androidLaunchArgs(options: OpenAndroidAppOptions): string[] {
   return options.launchArgs ?? [];
 }
@@ -169,11 +197,12 @@ export async function openAndroidApp(
   app: string,
   optionsOrActivity?: OpenAndroidAppOptions | string,
 ): Promise<void> {
+  const options = normalizeOpenAndroidAppOptions(optionsOrActivity);
+  const activity = options.activity;
+  if (activity !== undefined) requireAndroidActivityComponent(activity);
   if (!device.booted) {
     await waitForAndroidBoot(device.id);
   }
-  const options = normalizeOpenAndroidAppOptions(optionsOrActivity);
-  const activity = options.activity;
   const deepLinkTarget = app.trim();
   if (isDeepLinkTarget(deepLinkTarget)) {
     await openAndroidDeepLink(device, deepLinkTarget, options);
@@ -270,9 +299,7 @@ async function openAndroidPackageActivity(
   launchCategory: string,
   options: OpenAndroidAppOptions,
 ): Promise<void> {
-  const component = activity.includes('/')
-    ? activity
-    : `${packageName}/${activity.startsWith('.') ? activity : `.${activity}`}`;
+  const component = androidActivityComponent(packageName, activity);
   try {
     await runAndroidShell(
       device,
