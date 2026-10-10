@@ -1,4 +1,5 @@
 import type { CommandFlags } from '@agent-device/contracts/command';
+import type { PostOpenObservation } from '@agent-device/contracts/application-lifecycle-runtime';
 import type { SnapshotCaptureAnnotations } from '@agent-device/contracts/capture';
 import { isApplePlatform, isMobilePlatform } from '@agent-device/kernel/device';
 import type { SnapshotState } from '@agent-device/kernel/snapshot';
@@ -29,7 +30,8 @@ import type { SessionState } from './session-state.ts';
  * The deferred interaction outcome: the daemon's answer to "did that mutation
  * actually take effect?", produced after the mutation's own response has been
  * sent. This module is its one interface — every mutating route marks through
- * `markDeferredInteractionOutcome` right after dispatch, and every snapshot
+ * `markDeferredInteractionOutcome` right after dispatch (an app open also marks
+ * `markPostOpenStabilization` once its session is published), and every snapshot
  * capture resolves through `resolveDeferredInteractionOutcome`. The two
  * SessionState fields stay with their owner modules; this module is itself the
  * `postGestureStabilization` owner (R7), so hosting the interface here adds no
@@ -104,6 +106,22 @@ function markPostGestureStabilization(
         }
       : {}),
   };
+}
+
+/**
+ * Called once an app open has published its session. `unobservable` means the launch was still in
+ * flight or no app process was found when the open returned, so the next capture runs the
+ * quiet-window loop before a selector resolves against a layout that may still be moving (#3354). No baseline: the pre-open tree is a
+ * different surface, so the open is never reported as having no effect.
+ */
+export function markPostOpenStabilization(
+  session: SessionState,
+  observation: PostOpenObservation | undefined,
+): void {
+  if (!isApplePlatform(session.device.platform)) return;
+  if (!supportsPostGestureStabilization(session.device)) return;
+  if (observation !== 'unobservable') return;
+  session.postGestureStabilization = { action: 'open', positionals: [], markedAt: Date.now() };
 }
 
 function clearPostGestureStabilization(session: SessionState | undefined): void {
