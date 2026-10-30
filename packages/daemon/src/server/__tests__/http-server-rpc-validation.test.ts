@@ -20,7 +20,11 @@ import {
 type RpcErrorResponse = {
   jsonrpc: string;
   id: unknown;
-  error?: { code: number; message: string; data?: { code?: string } };
+  error?: {
+    code: number;
+    message: string;
+    data?: { code?: string; details?: { reason?: string; field?: string } };
+  };
   result?: unknown;
 };
 
@@ -261,7 +265,13 @@ test('remote HTTP rejects host path install sources in the command RPC used by t
     assert.equal(response.status, 400);
     assert.equal(response.body.error?.code, -32602);
     assert.equal(response.body.error?.data?.code, 'INVALID_ARGS');
-    assert.match(response.body.error?.message ?? '', /disabled on the remote HTTP surface/);
+    assert.deepEqual(
+      {
+        reason: response.body.error?.data?.details?.reason,
+        field: response.body.error?.data?.details?.field,
+      },
+      { reason: 'REMOTE_HOST_INPUT_DENIED', field: 'installSource' },
+    );
     assert.equal(handlerCalls, 0);
   } finally {
     await closeLoopbackServer(server);

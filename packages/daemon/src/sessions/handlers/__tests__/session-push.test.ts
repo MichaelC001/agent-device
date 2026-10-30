@@ -211,6 +211,57 @@ test('push treats an existing brace-prefixed payload as a file before inline JSO
   }
 });
 
+test('remote push parses inline JSON and never resolves it as a host file', async () => {
+  const sessionStore = makeSessionStore('agent-device-session-push-remote-inline-');
+  sessionStore.publish('default', {
+    name: 'default',
+    createdAt: Date.now(),
+    actions: [],
+    device: {
+      platform: 'android',
+      id: 'emulator-5554',
+      name: 'Pixel',
+      kind: 'emulator',
+      booted: true,
+    },
+  });
+  const inline = '{"action":"com.example.app.PUSH"}';
+  const cwd = mkdtempForTestSync('agent-device-session-push-remote-inline-');
+  fs.writeFileSync(path.join(cwd, inline), JSON.stringify({ action: 'host.file.PUSH' }));
+  mockPushNotificationRuntime.mockImplementation(async (input) => {
+    expect(input).toEqual({
+      appId: 'com.example.app',
+      payload: { action: 'com.example.app.PUSH' },
+    });
+    return { action: 'com.example.app.PUSH', extrasCount: 0 };
+  });
+
+  try {
+    const response = await handleSessionCommands({
+      host: { ...createTestHostEnvironment(), cwd },
+      createCommandSurface: fakeCreateCommandSurface,
+      platformServices: daemonPlatformServicesFixture(),
+      req: {
+        token: 't',
+        session: 'default',
+        command: 'push',
+        positionals: ['com.example.app', inline],
+        flags: {},
+        internal: { publicNetworkOnly: true },
+      },
+      sessionName: 'default',
+      logPath: '/tmp/daemon.log',
+      sessionStore,
+      invoke,
+    });
+
+    expect(response).toMatchObject({ ok: true });
+    expect(mockPushNotificationRuntime).toHaveBeenCalledOnce();
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('push stops at unavailable facts without binding', async () => {
   const sessionStore = makeSessionStore('agent-device-session-push-unsupported-');
   sessionStore.publish('default', {

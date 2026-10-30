@@ -10,7 +10,7 @@ import {
   uninstallAppUse,
 } from '@agent-device/contracts/app-deployment-runtime-plan';
 import { isIosFamily, publicPlatformString } from '@agent-device/kernel/device';
-import { readNotificationPayload } from '../dispatch-payload.ts';
+import { parseInlineNotificationPayload, readNotificationPayload } from '../dispatch-payload.ts';
 import {
   cleanupUploadedArtifact,
   prepareUploadedArtifact,
@@ -73,10 +73,11 @@ export async function handleAppDeploymentCommand(params: {
   if (!target.ok) return target.response;
 
   const uploadedArtifactId = req.meta?.uploadedArtifactId;
+  // Acquire before the cleanup scope: a rejected foreign upload ID must not delete that upload.
+  const appPath = uploadedArtifactId
+    ? prepareUploadedArtifact(uploadedArtifactId, req.meta?.tenantId)
+    : expandSessionPath(target.appPathInput, params.host.cwd);
   try {
-    const appPath = uploadedArtifactId
-      ? prepareUploadedArtifact(uploadedArtifactId, req.meta?.tenantId)
-      : expandSessionPath(target.appPathInput, params.host.cwd);
     if (!fs.existsSync(appPath)) {
       return errorResponse('INVALID_ARGS', `App binary not found: ${appPath}`);
     }
@@ -131,9 +132,11 @@ export async function handlePushNotificationCommand(
       'push requires <bundle|package> <payload.json|inline-json>',
     );
   }
-  const payload = await readNotificationPayload(
-    resolvePushPayload(payloadArg, req.meta?.cwd ?? params.host.cwd),
-  );
+  const payload = req.internal?.publicNetworkOnly
+    ? parseInlineNotificationPayload(payloadArg)
+    : await readNotificationPayload(
+        resolvePushPayload(payloadArg, req.meta?.cwd ?? params.host.cwd),
+      );
   const device = await resolveCommandDevice({
     session,
     flags,

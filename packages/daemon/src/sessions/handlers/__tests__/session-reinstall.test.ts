@@ -9,7 +9,10 @@ import {
   createTestHostEnvironment,
   mkdtempForTestSync,
 } from '@agent-device/test-kit';
-import { trackUploadedArtifact } from '../../../resources/artifact-tracking.ts';
+import {
+  prepareUploadedArtifact,
+  trackUploadedArtifact,
+} from '../../../resources/artifact-tracking.ts';
 import type {
   BindDeviceRuntime,
   InspectDeviceRuntimeFacts,
@@ -267,6 +270,49 @@ test('reinstall cleans an uploaded artifact after the request-scoped operation',
 
   expect(response?.ok).toBe(true);
   expect(fs.existsSync(root)).toBe(false);
+});
+
+test('install with another tenant upload ID leaves that upload in place', async () => {
+  const store = makeStore();
+  const session = makeSession('default', {
+    platform: 'android',
+    id: 'emulator-5554',
+    name: 'Pixel',
+    kind: 'emulator',
+    booted: true,
+  });
+  store.publish(session.name, session);
+  const root = mkdtempForTestSync('agent-device-foreign-upload-');
+  const appPath = path.join(root, 'Sample.apk');
+  fs.writeFileSync(appPath, 'placeholder');
+  const uploadedArtifactId = trackUploadedArtifact({
+    artifactPath: appPath,
+    tempDir: root,
+    tenantId: 'tenant-a',
+  });
+
+  await expect(
+    handleSessionCommands({
+      host: createTestHostEnvironment(),
+      createCommandSurface: fakeCreateCommandSurface,
+      platformServices: daemonPlatformServicesFixture(),
+      req: {
+        token: 't',
+        session: session.name,
+        command: 'install',
+        positionals: ['/client/Sample.apk'],
+        flags: {},
+        meta: { uploadedArtifactId, tenantId: 'tenant-b' },
+      },
+      sessionName: session.name,
+      logPath: '/tmp/daemon.log',
+      sessionStore: store,
+      invoke,
+    }),
+  ).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+  expect(fs.existsSync(appPath)).toBe(true);
+  expect(prepareUploadedArtifact(uploadedArtifactId, 'tenant-a')).toBe(appPath);
+  expect(mockDeployAppRuntime).not.toHaveBeenCalled();
 });
 
 test('HarmonyOS reinstall updates the active session identity from the runtime result', async () => {

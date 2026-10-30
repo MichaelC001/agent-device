@@ -59,7 +59,73 @@ function assertRemoteHostToolingInputs(
   if (hostPath || request.command === INTERNAL_COMMANDS.sessionSaveScript) {
     throw remoteHostInputDenied(hostPath ?? 'command');
   }
+  const hostArgument = findRemoteHostArgument(request);
+  if (hostArgument) throw remoteHostInputDenied(hostArgument);
 }
+
+/** Positional forms that name a daemon host file. Remote callers upload binaries and inline payloads. */
+function findRemoteHostArgument(request: DaemonRequest): string | undefined {
+  const positionals = request.positionals ?? [];
+  const uploadedArtifactId = request.meta?.uploadedArtifactId;
+  const hasUpload = typeof uploadedArtifactId === 'string' && uploadedArtifactId.length > 0;
+  if (request.meta?.installSource?.kind === 'path' && !hasUpload) return 'installSource';
+  switch (request.command) {
+    case 'install':
+    case 'reinstall':
+      return hasUpload ? undefined : 'appPath';
+    case 'push':
+      return positionals[1] === undefined || isInlineJsonPayload(positionals[1])
+        ? undefined
+        : 'payload';
+    case 'perf': {
+      const template = perfTemplatePositional(positionals);
+      return template && !REMOTE_XCTRACE_TEMPLATES.has(template) ? 'template' : undefined;
+    }
+  }
+  return undefined;
+}
+
+function isInlineJsonPayload(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.startsWith('{') && trimmed.endsWith('}');
+}
+
+function perfTemplatePositional(positionals: string[]): string | undefined {
+  const area = positionals[0]?.toLowerCase();
+  if (area === 'cpu') return positionals[4];
+  if (area === 'trace') return positionals[3];
+  return undefined;
+}
+
+// xctrace resolves a template argument as a file before it resolves a name, so remote callers may
+// name only the standard templates that `xcrun xctrace list templates` reports.
+const REMOTE_XCTRACE_TEMPLATES: ReadonlySet<string> = new Set([
+  'Activity Monitor',
+  'Allocations',
+  'Animation Hitches',
+  'App Launch',
+  'Audio System Trace',
+  'CPU Counters',
+  'CPU Profiler',
+  'Core AI',
+  'Data Persistence',
+  'File Activity',
+  'Foundation Models',
+  'Game Memory',
+  'Game Performance',
+  'Game Performance Overview',
+  'Leaks',
+  'Logging',
+  'Metal System Trace',
+  'Network',
+  'Power Profiler',
+  'Processor Trace',
+  'RealityKit Trace',
+  'Swift Concurrency',
+  'SwiftUI',
+  'System Trace',
+  'Time Profiler',
+]);
 
 function restrictRemoteBatchSteps(request: DaemonRequest): DaemonRequest {
   const flags = { ...request.flags };

@@ -59,17 +59,6 @@ function restrictRemoteHttpRequest(
     throw new AppError('INVALID_ARGS', 'Invalid daemon HTTP network access marker');
   }
   if (!authHookConfigured && networkAccessMarker === undefined) return request;
-  const source = request.meta?.installSource;
-  const uploadedArtifactId = request.meta?.uploadedArtifactId;
-  if (
-    source?.kind === 'path' &&
-    !(typeof uploadedArtifactId === 'string' && uploadedArtifactId.length > 0)
-  ) {
-    throw new AppError(
-      'INVALID_ARGS',
-      'Invalid params: path install sources are disabled on the remote HTTP surface',
-    );
-  }
   // A developer dir is a host path whose tools the daemon would run, and a credential fingerprint
   // would let a remote caller probe the daemon's credentials. A daemon with an auth hook serves
   // remote callers and runs on its operator's credentials, so it treats every caller as remote.

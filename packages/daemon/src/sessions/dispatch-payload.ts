@@ -7,6 +7,15 @@ export async function readNotificationPayload(payloadArg: string): Promise<JsonO
   const source = resolvePayloadInput(payloadArg, { subject: 'Push payload' });
   const payloadText =
     source.kind === 'inline' ? source.text : await readPushPayloadFile(source.path);
+  return parseNotificationPayload(payloadText, payloadArg);
+}
+
+/** Parses an inline payload without resolving it as a path. Remote requests carry only inline JSON. */
+export function parseInlineNotificationPayload(payloadText: string): JsonObject {
+  return parseNotificationPayload(payloadText, payloadText);
+}
+
+function parseNotificationPayload(payloadText: string, payloadArg: string): JsonObject {
   try {
     const parsed = JSON.parse(payloadText) as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
