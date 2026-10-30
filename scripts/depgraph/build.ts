@@ -18,10 +18,11 @@ import { pathToFileURL } from 'node:url';
 import { zoneRank } from '../layering/model.ts';
 import { runAffected } from './affected-run.ts';
 import { loadGraph } from './load.ts';
+import { graphEntries, type EntryManifest } from './entries.ts';
 import { computeLevels, markTransitivelyReachableEdges, type GraphData } from './model.ts';
 import {
   computeCohesionSummary,
-  computeDominatorSummary,
+  createDominatorAnalyzer,
   computeZoneSccSummary,
   type CohesionSummary,
   type DominatorSummary,
@@ -67,17 +68,22 @@ type Payload = {
    * Report-only structural summaries (scripts/depgraph/structure-summary.ts): no layering or
    * check-affected gate reads these fields today.
    */
+  entries: EntryManifest;
+  entrySummaries: Record<string, DominatorSummary>;
   dominatorSummary: DominatorSummary;
   zoneSccSummary: ZoneSccSummary;
   cohesionSummary: CohesionSummary;
 };
 
 function headCommit(): string {
+  if (process.env.VERCEL_GIT_COMMIT_SHA) return process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 10);
   try {
-    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+    return execFileSync('git', ['rev-parse', 'HEAD'], {
       cwd: repoRoot,
       encoding: 'utf8',
-    }).trim();
+    })
+      .trim()
+      .slice(0, 10);
   } catch {
     return 'unknown';
   }
@@ -107,11 +113,35 @@ function hasValueCycle(graph: Pick<GraphData, 'cycles'>): boolean {
 
 function buildPayload(dominatorEntry: string): Payload {
   const graph = loadGraph(repoRoot);
+  const dominatorsOf = createDominatorAnalyzer(graph);
+  const dominatorSummary = dominatorsOf(dominatorEntry);
   if (!hasValueCycle(graph)) markTransitivelyReachableEdges(graph.edges);
   const levels = computeLevels(graph.nodes, graph.edges);
 
   const zoneIndex = new Map(graph.zones.map((zone, index) => [zone.id, index]));
   const nodeIndex = new Map(graph.nodes.map((node, index) => [node.id, index]));
+  const entries = graphEntries(repoRoot, new Set(nodeIndex.keys()));
+  const hot = graph.nodes
+    .filter((n) => n.fanIn > 0)
+    .sort((a, b) => b.fanIn + b.fanOut - (a.fanIn + a.fanOut))
+    .slice(0, 300);
+  const selected = new Set([
+    ...Object.values(entries)
+      .flat()
+      .map((e) => e.id),
+    ...hot.map((n) => n.id.replace(/^src\//, '')),
+    dominatorEntry.replace(/^src\//, ''),
+  ]);
+  const originalIds = new Map(graph.nodes.map((n) => [n.id.replace(/^src\//, ''), n.id]));
+  const entrySummaries = Object.fromEntries(
+    [...selected].map((id) => {
+      const original = originalIds.get(id);
+      if (!original)
+        throw new Error(`Graph entry ${id} does not identify a production source file.`);
+      const summary = original === dominatorEntry ? dominatorSummary : dominatorsOf(original);
+      return [id, { ...summary, bottlenecks: summary.bottlenecks.slice(0, 8) }];
+    }),
+  );
 
   return {
     generated: { commit: headCommit(), files: graph.nodes.length, edges: graph.edges.length },
@@ -139,7 +169,9 @@ function buildPayload(dominatorEntry: string): Payload {
       path: cycle.path.map((file) => nodeIndex.get(file)!),
     })),
     typeInversions: graph.typeInversions,
-    dominatorSummary: computeDominatorSummary(dominatorEntry, graph),
+    entries,
+    entrySummaries,
+    dominatorSummary,
     zoneSccSummary: computeZoneSccSummary(graph),
     cohesionSummary: computeCohesionSummary(graph),
   };

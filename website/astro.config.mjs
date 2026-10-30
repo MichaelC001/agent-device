@@ -114,7 +114,10 @@ export default defineConfig({
           'testmu',
           'limrun',
         ]),
-        group('Reference', ['security-trust', 'known-limitations', 'migrating-gestures']),
+        {
+          label: 'Reference',
+          items: ['docs/security-trust', 'docs/known-limitations', 'docs/migrating-gestures'],
+        },
       ],
       plugins: [
         starlightLlmsTxt({
