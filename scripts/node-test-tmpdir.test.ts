@@ -86,6 +86,124 @@ test('the wrapper redirects a node --test child TMPDIR and removes it after the 
   }
 });
 
+type LeftoverPids = { fixture: number; fixtureChild: number; tool: number };
+
+// Started with its child-pid path as argv[1]. Both files are published by rename, so a reader
+// never sees a partial pid.
+const LEFTOVER_FIXTURE_SOURCE = `const fs = require('node:fs');
+const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+fs.writeFileSync(process.argv[1] + '.tmp', String(child.pid));
+fs.renameSync(process.argv[1] + '.tmp', process.argv[1]);
+setInterval(() => {}, 1000);`;
+
+// The probe leaves a Node fixture (with a child of its own) and a non-Node tool running, both
+// detached so they outlive the probe. With REAP_HOLD set, it then waits to be interrupted.
+const LEFTOVER_PROBE_SOURCE = `import fs from 'node:fs';
+import path from 'node:path';
+import { test } from 'node:test';
+import { runCmdDetached } from '@agent-device/host-kit/command';
+
+test('probe leaves a Node fixture and a non-Node tool running past its own exit', async () => {
+  const root = process.env.REAP_EVIDENCE_ROOT;
+  const childPidPath = path.join(root, 'fixture-child.txt');
+  const fixture = runCmdDetached(process.execPath, ['-e', ${JSON.stringify(LEFTOVER_FIXTURE_SOURCE)}, childPidPath]);
+  const tool = runCmdDetached('/bin/sleep', ['60']);
+  while (!fs.existsSync(childPidPath)) await new Promise((resolve) => setTimeout(resolve, 20));
+  const fixtureChild = Number(fs.readFileSync(childPidPath, 'utf8'));
+  const pidsPath = path.join(root, 'pids.json');
+  fs.writeFileSync(pidsPath + '.tmp', JSON.stringify({ fixture, fixtureChild, tool }));
+  fs.renameSync(pidsPath + '.tmp', pidsPath);
+  if (process.env.REAP_HOLD) await new Promise((resolve) => setTimeout(resolve, 60_000));
+});
+`;
+
+function writeLeftoverProbe(): string {
+  const probeName = `node-test-tmpdir-probe-reap-${process.pid}-${crypto.randomUUID()}.test.ts`;
+  const probePath = path.join(REPOSITORY_ROOT, 'scripts', probeName);
+  fs.writeFileSync(probePath, LEFTOVER_PROBE_SOURCE);
+  return probePath;
+}
+
+function leftoverProbeEnv(evidenceRoot: string, hold: boolean): NodeJS.ProcessEnv {
+  return { ...process.env, REAP_EVIDENCE_ROOT: evidenceRoot, REAP_HOLD: hold ? '1' : '' };
+}
+
+async function assertOnlyFixtureTreeStopped(stderr: string, pids: LeftoverPids): Promise<void> {
+  await waitFor(
+    () => !isAlive(pids.fixture) && !isAlive(pids.fixtureChild),
+    5_000,
+    'the leaked fixture or its child outlived its run',
+  );
+  assert.match(stderr, new RegExp(`\\[tmpdir\\] stopped [^]*\\n  ${pids.fixture} `));
+  assert.match(stderr, new RegExp(`\\[tmpdir\\] stopped [^]*\\n  ${pids.fixtureChild} `));
+  assert.equal(isAlive(pids.tool), true, 'a non-Node process is not the run’s to stop');
+}
+
+function killLeftovers(evidenceRoot: string): void {
+  const evidencePath = path.join(evidenceRoot, 'pids.json');
+  if (!fs.existsSync(evidencePath)) return;
+  const pids = JSON.parse(fs.readFileSync(evidencePath, 'utf8')) as LeftoverPids;
+  for (const pid of [pids.fixture, pids.fixtureChild, pids.tool]) {
+    // pid 0 or a negative pid would address a whole process group.
+    if (Number.isInteger(pid) && pid > 0 && isAlive(pid)) process.kill(pid, 'SIGKILL');
+  }
+}
+
+test('the wrapper stops an orphaned Node fixture tree still using the run directory, not a shared tool', async () => {
+  const evidenceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'node-test-tmpdir-reap-'));
+  const probePath = writeLeftoverProbe();
+  try {
+    const result = await runCmd(
+      process.execPath,
+      ['--experimental-strip-types', WRAPPER, '--experimental-strip-types', '--test', probePath],
+      { cwd: REPOSITORY_ROOT, env: leftoverProbeEnv(evidenceRoot, false), timeoutMs: 30_000 },
+    );
+    assert.equal(result.exitCode, 0, `probe run failed:\n${result.stdout}\n${result.stderr}`);
+    const pids = JSON.parse(fs.readFileSync(path.join(evidenceRoot, 'pids.json'), 'utf8'));
+    await assertOnlyFixtureTreeStopped(result.stderr, pids);
+  } finally {
+    killLeftovers(evidenceRoot);
+    fs.rmSync(probePath, { force: true });
+    fs.rmSync(evidenceRoot, { recursive: true, force: true });
+  }
+});
+
+test('an interrupted wrapper waits for its child, then stops the leftovers and exits 130', async () => {
+  const evidenceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'node-test-tmpdir-reap-signal-'));
+  const probePath = writeLeftoverProbe();
+  const wrapper = runCmdBackground(
+    process.execPath,
+    ['--experimental-strip-types', WRAPPER, '--experimental-strip-types', '--test', probePath],
+    { cwd: REPOSITORY_ROOT, env: leftoverProbeEnv(evidenceRoot, true), allowFailure: true },
+  );
+  try {
+    const evidencePath = path.join(evidenceRoot, 'pids.json');
+    await waitFor(() => fs.existsSync(evidencePath), 20_000, 'probe never reported its pids');
+    wrapper.child.kill('SIGINT');
+    const result = await wrapper.wait;
+    assert.equal(result.exitCode, 130, result.stderr);
+    await assertOnlyFixtureTreeStopped(
+      result.stderr,
+      JSON.parse(fs.readFileSync(evidencePath, 'utf8')),
+    );
+  } finally {
+    // An early failure leaves the wrapper running: interrupt it so it stops its own child and
+    // removes the run directory, and SIGKILL it only if that does not finish in time.
+    if (wrapper.child.exitCode === null && wrapper.child.signalCode === null) {
+      wrapper.child.kill('SIGINT');
+      const settled = await Promise.race([
+        wrapper.wait.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 10_000)),
+      ]);
+      if (!settled) wrapper.child.kill('SIGKILL');
+    }
+    await wrapper.wait;
+    killLeftovers(evidenceRoot);
+    fs.rmSync(probePath, { force: true });
+    fs.rmSync(evidenceRoot, { recursive: true, force: true });
+  }
+});
+
 test('the wrapper still cleans up and forwards a nonzero exit code when the child fails', async () => {
   // Diffing the whole shared TEST_RUN_TMP_ROOT listing is racy here: this
   // file itself runs as one of several node --test files/workers sharing

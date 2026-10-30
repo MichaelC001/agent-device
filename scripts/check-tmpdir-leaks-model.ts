@@ -1,6 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { runCmdSync } from '@agent-device/host-kit/command';
+import {
+  expandProcessTree,
+  listHostProcesses,
+  signalPidsBestEffort,
+} from '@agent-device/host-kit/process';
 
 // Every test run (Vitest via scripts/vitest-tmpdir-global-setup.ts, node --test
 // via scripts/node-test-tmpdir.ts) redirects TMPDIR into one disposable,
@@ -43,11 +48,62 @@ function isProcessAlive(pid: number): boolean {
  */
 export function liveRunDirectoryConsumers(): ReadonlySet<string> {
   const consumers = new Set<string>();
-  for (const value of readAllProcessTmpdirs()) {
-    const name = runDirectoryNameOf(value);
+  for (const { tmpdir } of readAllProcessTmpdirs()) {
+    const name = runDirectoryNameOf(tmpdir);
     if (name !== undefined) consumers.add(name);
   }
   return consumers;
+}
+
+/**
+ * SIGKILLs the process trees that tests left in `runDir` and returns one `<pid> <command>` line
+ * per stopped process. A run's owner calls this after its test processes have exited and before
+ * it removes the directory. A root is a Node process that holds `runDir` as TMPDIR and whose
+ * parent is neither the owner nor another process of this run: a test fixture whose own cleanup
+ * never ran (a killed worker, a timed-out test), reparented to init or a subreaper. Nothing
+ * else would ever stop it. A shared tool that a test happened to start first (an adb server, an
+ * emulator, watchman) runs another executable and is left alone, and so is any process whose
+ * parent in this run still runs and can still clean it up.
+ */
+export async function stopRunDirectoryConsumers(runDir: string): Promise<string[]> {
+  const name = runDirectoryNameOf(runDir);
+  if (name === undefined) return [];
+  const consumers = new Set(
+    readAllProcessTmpdirs()
+      .filter((entry) => entry.pid !== process.pid && runDirectoryNameOf(entry.tmpdir) === name)
+      .map((entry) => entry.pid),
+  );
+  if (consumers.size === 0) return [];
+  const runtime = path.basename(process.execPath);
+  const processes = await listHostProcesses({ timeoutMs: 10_000 });
+  const roots = processes.filter(
+    (entry) =>
+      consumers.has(entry.pid) &&
+      entry.ppid !== undefined &&
+      entry.ppid !== process.pid &&
+      !consumers.has(entry.ppid) &&
+      path.basename(entry.command.split(' ')[0] ?? '') === runtime,
+  );
+  const stopped = expandProcessTree(
+    roots.map((entry) => entry.pid),
+    processes,
+  );
+  signalPidsBestEffort(
+    stopped.map((entry) => entry.pid),
+    'SIGKILL',
+  );
+  return stopped.map((entry) => `${entry.pid} ${entry.command.slice(0, 300)}`.trimEnd());
+}
+
+/** One stderr block, only when a run's teardown had to stop processes its tests left behind. */
+export function reportStoppedRunDirectoryConsumers(
+  runDir: string,
+  stopped: readonly string[],
+): void {
+  if (stopped.length === 0) return;
+  process.stderr.write(
+    `[tmpdir] stopped ${stopped.length} process${stopped.length === 1 ? '' : 'es'} still using ${runDir} at teardown:\n${stopped.map((line) => `  ${line}\n`).join('')}`,
+  );
 }
 
 /** `/tmp/agent-device-test-run-123-abc/nested` → `agent-device-test-run-123-abc`; else undefined. */
@@ -58,15 +114,19 @@ export function runDirectoryNameOf(tmpdir: string): string | undefined {
   return name.startsWith(TEST_RUN_TMP_PREFIX) ? name : undefined;
 }
 
-function readAllProcessTmpdirs(): string[] {
+type ProcessTmpdir = Readonly<{ pid: number; tmpdir: string }>;
+
+function readAllProcessTmpdirs(): ProcessTmpdir[] {
   return process.platform === 'linux' ? readProcTmpdirs() : readPsTmpdirs();
 }
 
-function readProcTmpdirs(): string[] {
+function readProcTmpdirs(): ProcessTmpdir[] {
   return fs
     .readdirSync('/proc')
     .filter((entry) => /^\d+$/.test(entry))
-    .flatMap((pid) => tmpdirsOfEnviron(readEnvironOrEmpty(pid)));
+    .flatMap((pid) =>
+      tmpdirsOfEnviron(readEnvironOrEmpty(pid)).map((tmpdir) => ({ pid: Number(pid), tmpdir })),
+    );
 }
 
 /** Another user's process, or one that exited mid-scan, contributes nothing. */
@@ -87,13 +147,20 @@ function tmpdirsOfEnviron(environ: string): string[] {
 
 // macOS (and other BSDs): -E appends the environment to each command line. Every process's
 // environment is a few MB on a busy host — well past spawnSync's 1 MB default.
-function readPsTmpdirs(): string[] {
-  const listing = runCmdSync('ps', ['-axEww', '-o', 'command='], {
+function readPsTmpdirs(): ProcessTmpdir[] {
+  const listing = runCmdSync('ps', ['-axEww', '-o', 'pid=,command='], {
     allowFailure: true,
     maxBuffer: 64 * 1024 * 1024,
   });
   if (listing.exitCode !== 0) return [];
-  return [...listing.stdout.matchAll(/(?:^|\s)TMPDIR=(\S+)/g)].map((match) => match[1] as string);
+  return listing.stdout.split('\n').flatMap((line) => {
+    const pid = /^\s*(\d+)\s/.exec(line)?.[1];
+    if (pid === undefined) return [];
+    return [...line.matchAll(/\sTMPDIR=(\S+)/g)].map((match) => ({
+      pid: Number(pid),
+      tmpdir: match[1] as string,
+    }));
+  });
 }
 
 export type RunDirectoryLiveness = Readonly<{
