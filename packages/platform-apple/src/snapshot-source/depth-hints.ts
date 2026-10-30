@@ -1,3 +1,4 @@
+import { MAXIMUM_REQUEST_LEVELS } from './limits.ts';
 import type { SnapshotBridgeRecovery } from './protocol.ts';
 import type { SnapshotSourceTarget } from './types.ts';
 
@@ -50,7 +51,7 @@ export class AcceptedDepthHints {
     if (explicitDepth) return { nativeLevels: undefined, reason: 'explicit-depth' };
     const entry = this.currentEntry(target);
     if (entry === 'unidentified') return { nativeLevels: undefined, reason: 'unidentified-target' };
-    if (!entry || entry.nativeLevels >= requestedLevels) {
+    if (!entry || entry.nativeLevels >= firstRequestLevels(requestedLevels)) {
       return { nativeLevels: undefined, reason: 'no-hint' };
     }
     if (entry.remainingUses <= 0) return { nativeLevels: undefined, reason: 'probe-back' };
@@ -65,7 +66,8 @@ export class AcceptedDepthHints {
     recovery: SnapshotBridgeRecovery,
   ): DepthHintLearning {
     if (explicitDepth || !target.targetId) return 'ignored';
-    const recoveredLower = recovery.rejected > 0 && recovery.acceptedLevels < requestedLevels;
+    const firstRequest = firstRequestLevels(requestedLevels);
+    const recoveredLower = recovery.rejected > 0 && recovery.acceptedLevels < firstRequest;
     if (recoveredLower) {
       this.remember(target.targetId, {
         generation: target.generation,
@@ -74,7 +76,7 @@ export class AcceptedDepthHints {
       });
       return 'learned';
     }
-    const acceptedFullDepth = recovery.rejected === 0 && recovery.acceptedLevels >= requestedLevels;
+    const acceptedFullDepth = recovery.rejected === 0 && recovery.acceptedLevels >= firstRequest;
     if (acceptedFullDepth) {
       return this.entries.delete(target.targetId) ? 'forgotten' : 'ignored';
     }
@@ -100,4 +102,12 @@ export class AcceptedDepthHints {
     }
     this.entries.set(targetId, entry);
   }
+}
+
+/**
+ * Native levels the guest's first request asks for without a hint. Hints only change that request,
+ * so they compare against it, not against the whole requested depth.
+ */
+function firstRequestLevels(requestedLevels: number): number {
+  return Math.min(requestedLevels, MAXIMUM_REQUEST_LEVELS);
 }

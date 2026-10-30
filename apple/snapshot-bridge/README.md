@@ -78,16 +78,20 @@ zero-area or off-screen leaf is published: it hosts nothing the capture can miss
 A healthy capture uses one native request. If native acquisition rejects it,
 `SnapshotBridgeCapture.m` retries supported native failure codes at lower depths
 and fetches withheld children from their accessibility elements. The completed
-tree keeps the original depth and node limits; partial trees disclose truncation.
-The traversal depth counts edges below the root; native requests count the root
-as one level. Each acquisition allows two lower-depth retries, and recovery
-allows at most 32 native requests within the existing capture deadline,
-checks foreground ownership on every request, and returns a failure when it
-cannot complete a continuation. Budget exhaustion and malformed continuations
-use non-launch failure codes, so the route falls back without launch re-polling.
-At each native fragment boundary, an absent or invalid child count means unknown
-completeness and fails closed. Natural leaves above that boundary need no
-continuation evidence. Unchanged native dictionaries and child arrays are reused.
+tree keeps the original depth and node limits; partial trees disclose
+truncation. The traversal depth counts edges below the root; native requests
+count the root as one level. One native request reads at most 65 levels; deeper
+levels, up to the 128-level bound, arrive through continuations. On deep trees
+the AX server rejects a request that would return more than about 62 levels, so
+there the first request is rejected once and the lower-depth retry applies. Each
+acquisition allows two lower-depth retries, and recovery allows at most 64
+native requests within the existing capture deadline, checks foreground
+ownership on every request, and returns a failure when it cannot complete a
+continuation. Budget exhaustion and malformed continuations use non-launch
+failure codes, so the route falls back without launch re-polling. At each native
+fragment boundary, an absent or invalid child count means unknown completeness
+and fails closed. Natural leaves above that boundary need no continuation
+evidence. Unchanged native dictionaries and child arrays are reused.
 
 ## Accepted-depth hints
 

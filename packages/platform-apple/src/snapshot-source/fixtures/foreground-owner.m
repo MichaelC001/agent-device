@@ -45,7 +45,7 @@ static NSString *captureScenario;
   if ([captureScenario isEqual:@"runtime-budget"]) {
     BOOL root = ![element isKindOfClass:NSNumber.class];
     NSMutableArray *children = [NSMutableArray array];
-    for (NSUInteger i = 0; i < (root ? 40 : 1); i++) [children addObject:@{
+    for (NSUInteger i = 0; i < (root ? 80 : 1); i++) [children addObject:@{
         @"UIAccessibilitySnapshotKeyAttributes": @{}, @"UIAccessibilitySnapshotKeyChildren": @[],
         @"UIAccessibilitySnapshotKeyElement": @(i), @"UIAccessibilitySnapshotKeyChildrenCount": @(root ? 1 : 0)}];
     return @{@"UIAccessibilitySnapshotKeyAttributes": @{}, @"UIAccessibilitySnapshotKeyChildren": children};
@@ -153,7 +153,7 @@ int main(int argc, const char *argv[])
       BOOL budget = [scenario isEqual:@"request-budget"];
       NSUInteger depth = [scenario hasPrefix:@"api-depth-"] ? [[scenario substringFromIndex:10] integerValue] : 64;
       NSMutableArray *children = [NSMutableArray array];
-      for (NSUInteger i = 0; i < (budget ? 40 : 2); i++) {
+      for (NSUInteger i = 0; i < (budget ? 80 : 2); i++) {
         [children addObject:@{@"UIAccessibilitySnapshotKeyAttributes": @{}, @"UIAccessibilitySnapshotKeyChildren": @[],
             @"UIAccessibilitySnapshotKeyElement": @(i), @"UIAccessibilitySnapshotKeyChildrenCount": @(budget ? 1 : 0)}];
       }
@@ -164,20 +164,22 @@ int main(int argc, const char *argv[])
       NSDictionary *result = captureSnapshotTree(@"root", depth, 1000, 0, ^id(id element, NSUInteger levels, NSUInteger nodes, NSError **error) {
         requests++;
         if ([scenario hasPrefix:@"api-depth-"]) {
-          require(levels == depth + 1, @"native levels must include the root exactly once");
+          NSUInteger start = [element isKindOfClass:NSNumber.class] ? [element unsignedIntegerValue] : 0;
+          require(levels == MIN(depth + 1 - start, 65), @"native levels must include the root exactly once, at most 65 per request");
+          NSUInteger end = MIN(start + levels, depth + 1);
           NSDictionary *tree = nil;
-          for (NSUInteger i = 0; i < levels; i++) tree = @{@"UIAccessibilitySnapshotKeyAttributes": @{}, @"UIAccessibilitySnapshotKeyChildrenCount": [scenario isEqual:@"api-depth-unknown"] ? [NSNull null] : @(tree ? 1 : 0), @"UIAccessibilitySnapshotKeyChildren": tree ? @[tree] : @[]};
+          for (NSUInteger level = end; level-- > start;) tree = @{@"UIAccessibilitySnapshotKeyAttributes": @{}, @"UIAccessibilitySnapshotKeyElement": @(level), @"UIAccessibilitySnapshotKeyChildrenCount": [scenario isEqual:@"api-depth-unknown"] ? [NSNull null] : @(level < depth ? 1 : 0), @"UIAccessibilitySnapshotKeyChildren": tree ? @[tree] : @[]};
           return tree;
         }
         if ([element isEqual:@"root"]) return root;
         return @{@"UIAccessibilitySnapshotKeyAttributes": @{}, @"UIAccessibilitySnapshotKeyChildren": @[@{@"UIAccessibilitySnapshotKeyAttributes": @{}, @"UIAccessibilitySnapshotKeyChildren": @[]}]};
       }, &truncated, NULL, &failure);
-      if (budget) require(!result && failure.code == 1 && requests == 32, @"request budget must fail without publishing partial content");
+      if (budget) require(!result && failure.code == 1 && requests == 64, @"request budget must fail without publishing partial content");
       else if ([scenario isEqual:@"identity"]) require(result == root && requests == 1, @"healthy capture must reuse the native tree");
       else {
         NSUInteger count = 0;
         for (NSDictionary *node = result; node; node = [node[@"UIAccessibilitySnapshotKeyChildren"] firstObject]) count++;
-        require(count == depth + 1 && truncated == [scenario isEqual:@"api-depth-unknown"] && requests == 1, @"every requested depth must include root plus permitted descendants");
+        require(count == depth + 1 && truncated == [scenario isEqual:@"api-depth-unknown"] && requests == (depth + 1 > 65 ? 2 : 1), @"every requested depth must include root plus permitted descendants");
       }
       return 0;
     }
@@ -191,7 +193,7 @@ int main(int argc, const char *argv[])
     NSString *expectedCode = nil;
     NSUInteger expectedCaptures = 0;
     if ([scenario isEqual:@"runtime-budget"]) {
-      expectedCaptures = 32;
+      expectedCaptures = 64;
       expectedCode = @"continuation-budget-exhausted";
     } else if ([scenario hasPrefix:@"wide-"] || [scenario isEqual:@"zero-depth"]) {
       expectedCaptures = [scenario isEqual:@"wide-continuation"] ? 2 : 1;

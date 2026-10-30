@@ -4,14 +4,20 @@ import type { SnapshotSourceLimits } from './types.ts';
 const FRAME_HEADER_BYTES = 4;
 const MAXIMUM_FRAME_BYTES = 16 * 1024 * 1024;
 const MAXIMUM_DURATION_MS = 120_000;
+// Mirrors the native bridge's kMaximumDepth.
 const MAXIMUM_DEPTH = 128;
+// Mirrors the native bridge's maximumRequestLevels: one native request reads at most this many
+// levels, and deeper levels arrive through continuations.
+export const MAXIMUM_REQUEST_LEVELS = 65;
 const MAXIMUM_NODES = 10_000;
 
 export const DEFAULT_SNAPSHOT_SOURCE_LIMITS: SnapshotSourceLimits = Object.freeze({
   maxRequestBytes: 64 * 1024,
   maxResponseBytes: 4 * 1024 * 1024,
   maxNodes: 5000,
-  maxTraversalDepth: 64,
+  // The bridge reads past the AX server's per-request depth limit through continuations, so a
+  // regular capture asks for every level it can deliver; a lower default hides deep controls.
+  maxTraversalDepth: MAXIMUM_DEPTH,
   maxDurationMs: 5_000,
 });
 

@@ -12,6 +12,7 @@ import { createSnapshotSourceHost } from './host.ts';
 import { createSimulatorSnapshotSource } from './adapter.ts';
 import { simulatorAddressFor } from '../core/simctl.ts';
 import { DEPTH_HINT_PROBE_BACK_AFTER_USES } from './depth-hints.ts';
+import { MAXIMUM_REQUEST_LEVELS } from './limits.ts';
 import {
   encodeSnapshotBridgeFrame,
   SNAPSHOT_SOURCE_PROTOCOL_VERSION,
@@ -282,6 +283,53 @@ test('the Simulator AX source learns a hint only from a validated acquisition', 
         ['malformed-tree', 'recovery-invalid'],
       );
     }
+  } finally {
+    await source.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the Simulator AX source forgets a hint once a default-depth probe-back is accepted', async () => {
+  const root = await mkdtempForTest('agent-device-snapshot-adapter-forget-');
+  const sourceRoot = path.join(root, 'source');
+  await (await import('@agent-device/host-kit/host-file')).ensureHostDirectory(sourceRoot);
+  for (const name of [
+    'SnapshotBridge.m',
+    'SnapshotBridgeRuntime.m',
+    'SnapshotBridgeRuntime.h',
+    'SnapshotBridgeCapture.h',
+    'SnapshotBridgeCapture.m',
+    'ForegroundApplicationGeometry.h',
+  ]) {
+    await writeFile(path.join(sourceRoot, name), 'native source');
+  }
+  const fixture = createAdapterHost();
+  // Default limits: the traversal bound is deeper than one native request.
+  const source = createSimulatorSnapshotSource({
+    host: fixture.host,
+    sourceRoot,
+    cacheRoot: path.join(root, 'cache'),
+  });
+  const hint = deriveIosCaptureHint(createIosSnapshotRequest());
+  const target = { ...targetForTest(), targetId: 'target-1', generation: 'generation-1' };
+
+  try {
+    fixture.rejectLevelsAbove = 32;
+    assert.equal((await source.acquire({ target, hint })).stage, 'acquired');
+    fixture.rejectLevelsAbove = undefined;
+    for (let use = 0; use <= DEPTH_HINT_PROBE_BACK_AFTER_USES; use++) {
+      assert.equal((await source.acquire({ target, hint })).stage, 'acquired');
+    }
+    assert.equal((await source.acquire({ target, hint })).stage, 'acquired');
+    assert.deepEqual(
+      fixture.diagnostics
+        .slice(-2)
+        .map((event) => [event.requestedLevels, event.hint, event.learning]),
+      [
+        [129, 'probe-back', 'forgotten'],
+        [129, 'no-hint', 'ignored'],
+      ],
+    );
   } finally {
     await source.close();
     await rm(root, { recursive: true, force: true });
@@ -605,8 +653,12 @@ class AdapterSocket extends EventEmitter implements SnapshotSourceSocket {
     };
     this.fixture.requestedDepths.push(request.maxDepth);
     this.fixture.requestedHints.push(request.nativeLevelsHint);
-    // The guest's own recovery: halve a rejected depth at most twice, like SnapshotBridgeCapture.
-    const requestedLevels = request.nativeLevelsHint ?? request.maxDepth + 1;
+    // The guest's own recovery: one request reads at most 65 levels, and a rejected depth halves
+    // at most twice, like SnapshotBridgeCapture.
+    const requestedLevels = Math.min(
+      request.maxDepth + 1,
+      request.nativeLevelsHint ?? MAXIMUM_REQUEST_LEVELS,
+    );
     const rejectAbove = this.fixture.rejectLevelsAbove;
     let acceptedLevels = requestedLevels;
     let rejected = 0;

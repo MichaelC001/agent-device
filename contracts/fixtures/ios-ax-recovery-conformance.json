@@ -43,7 +43,7 @@
     "Recovery ladder: the host halves the rejected depth at most twice per request; the runner walks 56/40/24/12 and has no rung below 12. A rejection at depth 8 recovers on the host and fails on the runner.",
     "Completeness evidence: the host trusts native child counts and fails closed when a boundary count is missing; the runner infers frontiers from the deepest childless level and pays one extra call to verify a natural leaf that sits at the cap (unknown-frontier-evidence, hint-rejected-then-lower).",
     "Delivered depth: host continuations keep the requested traversal depth and disclose deeper content as truncated; runner extension re-roots with the same native depth, so the delivered tree can exceed the requested depth and an explicit depth is not disclosed as truncated (deeper-than-requested, explicit-depth-honored).",
-    "Budgets: the host spends one continuation per withheld parent inside a 32-request budget; the runner spends one extension call per frontier node inside an 8-call budget (host-request-budget, runner-extension-budget).",
+    "Budgets: the host spends one continuation per withheld parent inside a 64-request budget; the runner spends one extension call per frontier node inside an 8-call budget (host-request-budget, runner-extension-budget).",
     "Ownership and deadlines: only the host checks the foreground owner on every native request; only the runner consults the capture deadline between rungs and extension calls (owner-change-during-continuation, deadline-before-retry).",
     "Hints: both producers learn from any finished lower-depth recovery, bounded trees included (bounded-recovery-still-learned); the host keys on the resolved target generation and expires by hinted-capture count, while the runner keys on bundle id + pid and expires by wall clock (probe-back-after-expiry)."
   ],
@@ -371,7 +371,7 @@
           "chain": 15,
           "fan": {
             "at": 14,
-            "count": 40,
+            "count": 80,
             "chain": 1
           }
         },
@@ -382,9 +382,9 @@
         "host-bridge": {
           "outcome": "failed",
           "failure": "request-budget-exhausted",
-          "requests": 32,
+          "requests": 64,
           "rejected": 2,
-          "continuations": 29
+          "continuations": 61
         },
         "runner": {
           "outcome": "complete",
@@ -392,8 +392,8 @@
           "rejected": 4,
           "continuations": 1,
           "deepestLevel": 16,
-          "tree": "0-14,15.0-16.0,15.1-16.1,15.2-16.2,15.3-16.3,15.4-16.4,15.5-16.5,15.6-16.6,15.7-16.7,15.8-16.8,15.9-16.9,15.10-16.10,15.11-16.11,15.12-16.12,15.13-16.13,15.14-16.14,15.15-16.15,15.16-16.16,15.17-16.17,15.18-16.18,15.19-16.19,15.20-16.20,15.21-16.21,15.22-16.22,15.23-16.23,15.24-16.24,15.25-16.25,15.26-16.26,15.27-16.27,15.28-16.28,15.29-16.29,15.30-16.30,15.31-16.31,15.32-16.32,15.33-16.33,15.34-16.34,15.35-16.35,15.36-16.36,15.37-16.37,15.38-16.38,15.39-16.39",
-          "nodes": 95
+          "tree": "0-14,15.0-16.0,15.1-16.1,15.2-16.2,15.3-16.3,15.4-16.4,15.5-16.5,15.6-16.6,15.7-16.7,15.8-16.8,15.9-16.9,15.10-16.10,15.11-16.11,15.12-16.12,15.13-16.13,15.14-16.14,15.15-16.15,15.16-16.16,15.17-16.17,15.18-16.18,15.19-16.19,15.20-16.20,15.21-16.21,15.22-16.22,15.23-16.23,15.24-16.24,15.25-16.25,15.26-16.26,15.27-16.27,15.28-16.28,15.29-16.29,15.30-16.30,15.31-16.31,15.32-16.32,15.33-16.33,15.34-16.34,15.35-16.35,15.36-16.36,15.37-16.37,15.38-16.38,15.39-16.39,15.40-16.40,15.41-16.41,15.42-16.42,15.43-16.43,15.44-16.44,15.45-16.45,15.46-16.46,15.47-16.47,15.48-16.48,15.49-16.49,15.50-16.50,15.51-16.51,15.52-16.52,15.53-16.53,15.54-16.54,15.55-16.55,15.56-16.56,15.57-16.57,15.58-16.58,15.59-16.59,15.60-16.60,15.61-16.61,15.62-16.62,15.63-16.63,15.64-16.64,15.65-16.65,15.66-16.66,15.67-16.67,15.68-16.68,15.69-16.69,15.70-16.70,15.71-16.71,15.72-16.72,15.73-16.73,15.74-16.74,15.75-16.75,15.76-16.76,15.77-16.77,15.78-16.78,15.79-16.79",
+          "nodes": 175
         }
       }
     },
