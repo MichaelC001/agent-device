@@ -1,11 +1,12 @@
 import { bindTestCommandHost } from '@agent-device/test-kit';
 import { describe, expect, test } from 'vitest';
+import { listCommandMetadata } from '@agent-device/command-surface';
 import {
-  listCommandFamilyCliOutputFormatters,
-  listCommandFamilyMetadata,
-} from './family/registry.ts';
-import { formatCliOutput, isParseableOutputCommand } from './cli-output.ts';
-import type { CommandName } from './command-metadata.ts';
+  formatCliOutput,
+  isParseableOutputCommand,
+  listCliOutputFormatters,
+} from './cli-output.ts';
+import type { CommandName } from '@agent-device/command-surface';
 
 bindTestCommandHost();
 
@@ -26,10 +27,58 @@ const PARSEABLE_OUTPUT_COMMANDS = [
   'record',
 ] as const satisfies readonly CommandName[];
 
-/** Every command the registry gives a text formatter — the population the rule must cover. */
-const FORMATTER_COMMANDS = Object.keys(
-  listCommandFamilyCliOutputFormatters(),
-).sort() as CommandName[];
+const FORMATTER_COMMANDS = [
+  'action-button',
+  'alert',
+  'app-switcher',
+  'apps',
+  'appstate',
+  'artifacts',
+  'audio',
+  'back',
+  'batch',
+  'boot',
+  'capabilities',
+  'click',
+  'clipboard',
+  'close',
+  'debug',
+  'devices',
+  'doctor',
+  'events',
+  'fill',
+  'find',
+  'fold',
+  'get',
+  'hardware-button',
+  'home',
+  'hover',
+  'install',
+  'install-from-source',
+  'is',
+  'keyboard',
+  'logs',
+  'longpress',
+  'metro',
+  'network',
+  'open',
+  'orientation',
+  'perf',
+  'prepare',
+  'press',
+  'record',
+  'reinstall',
+  'replay',
+  'scroll',
+  'session',
+  'settings',
+  'shutdown',
+  'snapshot',
+  'telephony',
+  'tv-remote',
+  'viewport',
+  'wait',
+] as const satisfies readonly CommandName[];
 
 async function render(name: CommandName, result: unknown, input = {}) {
   const output = await formatCliOutput({ env: process.env, name, input, result });
@@ -76,14 +125,20 @@ test('the parseable-output set is exactly the declared exceptions', () => {
   );
 });
 
+test('every command with a dedicated text response retains its dispatcher binding', () => {
+  expect(Object.keys(listCliOutputFormatters()).sort()).toEqual(FORMATTER_COMMANDS);
+});
+
 /**
  * The commands with no formatter answer through the CLI's generic path, which routes the same way.
  * None of them may declare `parseableOutput`, because that path has no second stream to split — if
  * one ever does, it owes its own printer instead of silently losing the disclosure.
  */
 test('a command with no formatter never opts out of stdout', () => {
-  const allCommands = listCommandFamilyMetadata().map((metadata) => metadata.name);
-  const withoutFormatter = allCommands.filter((name) => !FORMATTER_COMMANDS.includes(name));
+  const allCommands = listCommandMetadata().map((metadata) => metadata.name);
+  const withoutFormatter = allCommands.filter(
+    (name) => !(FORMATTER_COMMANDS as readonly CommandName[]).includes(name),
+  );
   expect(withoutFormatter.length).toBeGreaterThan(0);
   expect(withoutFormatter.filter(isParseableOutputCommand)).toEqual([]);
 });
