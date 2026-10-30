@@ -285,8 +285,10 @@ const workspacePackageOwnership: OwnershipRule = ({ file, isTs }) => {
   return selections;
 };
 
+// The Apple runner package is the Apple-family engine platform-apple composes, so it carries the
+// same scenario ownership as a platform package despite its name.
 const platformPackageScenarioOwnership: OwnershipRule = ({ file, isTs }) => {
-  if (!isTs || !/^packages\/platform-[^/]+\/src\//.test(file)) {
+  if (!isTs || !/^packages\/(?:platform-[^/]+|apple-runner)\/src\//.test(file)) {
     return [];
   }
   return [
@@ -408,7 +410,7 @@ const ownsAppleRunnerBuildSource = (file: string): boolean =>
   file.startsWith('apple/runner/') ||
   file.startsWith('apple/snapshot-presentation/') ||
   file === 'apple/snapshot-bridge/ForegroundApplicationGeometry.h' ||
-  (file.startsWith('packages/platform-apple/src/runner/') && !file.includes('/__tests__/')) ||
+  (file.startsWith('packages/apple-runner/src/') && !file.includes('/__tests__/')) ||
   file.endsWith('.swift');
 
 const nativeDupesOwnership: OwnershipRule = ({ file }) =>

@@ -127,6 +127,21 @@ export {
   recordArticleEvidence,
 } from './target-classification-fixtures.ts';
 export { mkdtempForTest, mkdtempForTestSync } from './tmp-dir.ts';
+export {
+  STUBBED_APPLE_TOOLCHAIN,
+  stubbedAppleDeveloperDir,
+  writeXcodeFixture,
+} from './apple-toolchain-fixtures.ts';
+export {
+  loadRealHostKitCapabilities,
+  runRealHostCommand,
+  withRequestDeadline,
+} from './host-kit-capabilities.ts';
+export {
+  assertProducedRunnerRequests,
+  readRunnerRequestFixture,
+  REPO_ROOT,
+} from './runner-requests.fixtures.ts';
 export { likelyPlayableWebmContainer } from './video-fixtures.ts';
 export {
   installFakeManagedAgentBrowser,

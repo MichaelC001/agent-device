@@ -13,6 +13,7 @@ Before you edit a module with many callers, run `pnpm depgraph affected <path>` 
 | Runtime-fact admission | `packages/daemon/src/core/runtime-admission.ts`, `src/platform-runtime-gateway.ts` |
 | Input fields and audiences | `src/commands/common-input-fields.ts`, `src/commands/input-audience.ts` |
 | Released SDK default hosts | `src/sdk/host.ts` |
+| Apple runner host port and its one binding | `packages/apple-runner/src/host.ts`, `packages/platform-apple/src/core/runner-client.ts` |
 
 For SDK entries `android-adb`, `artifacts`, `limrun`, `metro`, and `remote-config`, use `captureSdkHost` for defaults.
 For command-host readers, use `withSdkHost`.
@@ -29,17 +30,13 @@ Change cross-language rules through `contracts/fixtures/` golden tables.
 Name modules for the domain question they answer. Keep claims with the code that enforces them.
 Use barrels only at package boundaries.
 Before you add behavior, split files over 1,000 lines, except generated or fixture data.
-Split a source module and its tests together.
 Do not extend legacy interaction or platform index test aggregations.
 Keep tests beside their named module. Put repository artifact guards in `test/repo-guards/`.
 Shared test support belongs in `@agent-device/test-kit`, a devDependency.
-Production code must not import test-kit.
-Test-kit must not depend on platforms, providers, the daemon, or root.
 
 ## Diagnostics
 
 Use `@agent-device/host-kit/diagnostics`. Keep request diagnostics in the session request log.
-Get session artifact paths from `packages/daemon-contracts/src/session-artifact-paths.ts`.
 Keep app/device output in `app.log`.
 Keep Apple runner and xcodebuild output in `runner.log`.
 Normalize errors with `normalizeError`. Preserve these fields:

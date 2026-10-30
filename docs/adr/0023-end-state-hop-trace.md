@@ -255,7 +255,7 @@ The clear has no effect on iOS.
 | 16 | `packages/host-kit/src/internal/host-file.ts` | file operations for socket/bridge directories | adapter | KEEP — bridge socket file operations |
 | 17 | `packages/platform-apple/src/snapshot-source/transport.ts` | `roundTripSnapshotBridge`: `socket.write` at :107 | **terminal (adapter)** | n/a (terminal) |
 
-### Arm B — fallback (XCTest runner, steady state), 19 files
+### Arm B — fallback (XCTest runner, steady state), 18 files
 
 | # | File | Hand-off | Role | Delete-test |
 |---|------|----------|------|-------------|
@@ -264,20 +264,19 @@ The clear has no effect on iOS.
 | 3 | `src/core/platform-plugin-registry.ts` | `getPlugin` lookup; throws `UNSUPPORTED_PLATFORM` | policy | KEEP — platform plugin registry |
 | 4 | `packages/platform-apple/src/interactor.ts` | `captureAppleRunnerSnapshot` builds the command payload | orchestration | KEEP — interactor contract implementation |
 | 5 | `packages/platform-apple/src/core/runner-client.ts` | re-export entry for the runner client | pass-through | KEEP — client composition root |
-| 6 | `packages/platform-apple/src/runner/client.ts` | `createAppleRunnerClient` at module init | orchestration | KEEP — runner client factory |
-| 7 | `packages/platform-apple/src/runner/runner-client.ts` | `runAppleRunnerCommand`: read-only retry, `waitForRunner` | policy | KEEP — runner command dispatch + retry |
-| 8 | `packages/platform-apple/src/runner/host.ts` | `bindAppleRunnerHost`: retry/diagnostic/Deadline delegates | adapter | KEEP — injected host seam (runner tests stub it) |
-| 9 | `packages/platform-apple/src/runner/runner-command-traits.ts` | `isReadOnlyRunnerCommand`: snapshot is read-only | policy | KEEP — command trait classification |
-| 10 | `packages/platform-apple/src/runner/runner-contract.ts` | command id, request signal, active assertion | policy | KEEP — runner request contract |
-| 11 | `packages/host-kit/src/internal/retry.ts` | `retryWithPolicy`: bounded retry loop | policy | KEEP — retry policy |
-| 12 | `packages/kernel/src/keyed-lock.ts` | `withKeyedLock` for session/lease locks | policy | KEEP — named lock primitive |
-| 13 | `packages/platform-apple/src/runner/runner-lifecycle.ts` | `executeRunnerCommand`: session snapshot, `ensureRunnerSession` | orchestration | KEEP — runner command execution |
-| 14 | `packages/platform-apple/src/runner/runner-session.ts` | steady `resolveReusableRunnerSession` → `executeRunnerCommandWithSession` | orchestration | KEEP — session reuse + preflight |
-| 15 | `packages/platform-apple/src/runner/runner-recycle-ledger.ts` | ledger key, touched-session check/mark | policy | KEEP — recycle budget ledger |
-| 16 | `packages/platform-apple/src/runner/runner-disposal.ts` | `isRunnerProcessAlive` liveness check | policy | KEEP — lease liveness + cleanup |
-| 17 | `packages/platform-apple/src/runner/runner-command-route.ts` | `resolveRoute`: loopback/usbmux endpoint | translation | KEEP — usbmux/network route model |
-| 18 | `packages/platform-apple/src/runner/runner-startup-transport.ts` | `waitForRunner` → `tryRunnerRoute` → `postRunnerCommandOverRoute` | orchestration | KEEP — readiness wait (network route) |
-| 19 | `packages/platform-apple/src/runner/runner-transport.ts` | `fetchWithTimeout` → `fetch` to the runner at :90 | **terminal (adapter)** | n/a (terminal) |
+| 6 | `packages/apple-runner/src/index.ts` | `runAppleRunnerCommand`: read-only retry, `waitForRunner` | policy | KEEP — runner command dispatch + retry |
+| 7 | `packages/apple-runner/src/host.ts` | `bindAppleRunnerHost`: retry/diagnostic/Deadline delegates | adapter | KEEP — injected host seam (runner tests stub it) |
+| 8 | `packages/apple-runner/src/runner-command-traits.ts` | `isReadOnlyRunnerCommand`: snapshot is read-only | policy | KEEP — command trait classification |
+| 9 | `packages/apple-runner/src/runner-contract.ts` | command id, request signal, active assertion | policy | KEEP — runner request contract |
+| 10 | `packages/host-kit/src/internal/retry.ts` | `retryWithPolicy`: bounded retry loop | policy | KEEP — retry policy |
+| 11 | `packages/kernel/src/keyed-lock.ts` | `withKeyedLock` for session/lease locks | policy | KEEP — named lock primitive |
+| 12 | `packages/apple-runner/src/runner-lifecycle.ts` | `executeRunnerCommand`: session snapshot, `ensureRunnerSession` | orchestration | KEEP — runner command execution |
+| 13 | `packages/apple-runner/src/runner-session.ts` | steady `resolveReusableRunnerSession` → `executeRunnerCommandWithSession` | orchestration | KEEP — session reuse + preflight |
+| 14 | `packages/apple-runner/src/runner-recycle-ledger.ts` | ledger key, touched-session check/mark | policy | KEEP — recycle budget ledger |
+| 15 | `packages/apple-runner/src/runner-disposal.ts` | `isRunnerProcessAlive` liveness check | policy | KEEP — lease liveness + cleanup |
+| 16 | `packages/apple-runner/src/runner-command-route.ts` | `resolveRoute`: loopback/usbmux endpoint | translation | KEEP — usbmux/network route model |
+| 17 | `packages/apple-runner/src/runner-startup-transport.ts` | `waitForRunner` → `tryRunnerRoute` → `postRunnerCommandOverRoute` | orchestration | KEEP — readiness wait (network route) |
+| 18 | `packages/apple-runner/src/runner-transport.ts` | `fetchWithTimeout` → `fetch` to the runner at :90 | **terminal (adapter)** | n/a (terminal) |
 
 Arm B #4 re-enters `packages/platform-apple/src/index.ts`, shared #22, through `applePlugin.createInteractor`.
 The file counts once.
@@ -297,7 +296,7 @@ The builders are in `packages/contracts/src/*-runtime.ts`. They are side-calls o
 - `packages/daemon/src/execution/sparse-fallback-screenshot.ts`
 - `src/core/snapshot-state.ts`
 - `packages/contracts/src/capture.ts`
-- `packages/platform-apple/src/runner/snapshot-presentation.ts`
+- `packages/platform-apple/src/snapshot-presentation.ts`
 - `src/snapshot/ios-snapshot-runtime.ts`
 - Modules under `packages/capture-kit/src/ios-snapshot-engine/`:
   - engine
@@ -321,7 +320,7 @@ The builders are in `packages/contracts/src/*-runtime.ts`. They are side-calls o
 - macOS surface-capture arms.
 - `snapshot-runtime-binding.ts`: `selector-*`/`custom-actions-*` plan arms.
 - Arm B's **cold-start chain**, because a steady-state session exists.
-  `startRunnerSessionWithLease` in `runner-session.ts` enters approximately 15 files under `packages/platform-apple/src/runner/`:
+  `startRunnerSessionWithLease` in `runner-session.ts` enters approximately 15 files under `packages/apple-runner/src/`:
   - `runner-lease`
   - `runner-adoption`
   - `runner-artifact`
