@@ -6,7 +6,7 @@ const MAXIMUM_FRAME_BYTES = 16 * 1024 * 1024;
 const MAXIMUM_DURATION_MS = 120_000;
 // Mirrors the native bridge's kMaximumDepth.
 const MAXIMUM_DEPTH = 128;
-// Mirrors the native bridge's maximumRequestLevels: one native request reads at most this many
+// Mirrors the native bridge's kMaximumRequestLevels: one native request reads at most this many
 // levels, and deeper levels arrive through continuations.
 export const MAXIMUM_REQUEST_LEVELS = 65;
 const MAXIMUM_NODES = 10_000;
