@@ -277,7 +277,7 @@ class LimrunIosInteractor implements Interactor {
     await this.enterText(text, delayMs);
   }
 
-  async fill(x: number, y: number, text: string, delayMs?: number): Promise<FillBackendResult> {
+  async fill(x: number, y: number, text: string, _delayMs?: number): Promise<FillBackendResult> {
     // Loaded on the fill path to keep this provider's declared import-time closure budget.
     const { awaitLimrunTextEntryFocus, readLimrunUnambiguousTapTargets, readLimrunTextEntryFocus } =
       await import('./text-entry-focus.ts');
@@ -295,14 +295,22 @@ class LimrunIosInteractor implements Interactor {
       x,
       y,
     });
-    // Select first: iOS replaces a selection on the next key, so `fill` replaces and
-    // an empty fill clears.
-    await this.session.client.pressKey('a', ['command']);
-    if (text.length === 0) {
-      await this.session.client.pressKey('delete');
-      return { textEntryReadiness };
+    // Omitting the selector lets the server resolve focus.
+    try {
+      await this.session.client.setElementValue(text);
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        'COMMAND_FAILED',
+        'Limrun could not write the focused field value.',
+        {
+          reason: 'text_entry_value_write_failed',
+          dispatched: 'unknown',
+          hint: 'Inspect and assert the field or resulting screen before continuing. If the value needs correction, retry fill with the full desired value. To append with key events, focus the field with press, then use type.',
+        },
+        error,
+      );
     }
-    await this.enterText(text, delayMs);
     return { textEntryReadiness };
   }
 
