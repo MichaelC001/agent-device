@@ -1,6 +1,10 @@
 import { readHostTextFile } from '@agent-device/host-kit/host-file';
 import { parseXmlDocumentSync, visitXmlPlistEntries } from '@agent-device/xml';
-import { readApplePlistJson, runAppleToolCommand } from './tool-provider.ts';
+import {
+  APPLE_PLIST_TIMEOUT_MS,
+  readApplePlistJson,
+  runAppleToolCommand,
+} from './tool-provider.ts';
 
 export async function readInfoPlistString(
   infoPlistPath: string,
@@ -24,6 +28,7 @@ export async function readInfoPlistString(
       ['-extract', key, 'raw', '-o', '-', infoPlistPath],
       {
         allowFailure: true,
+        timeoutMs: APPLE_PLIST_TIMEOUT_MS,
         signal,
       },
     );

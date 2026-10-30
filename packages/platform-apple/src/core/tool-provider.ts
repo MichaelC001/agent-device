@@ -60,6 +60,8 @@ export type AppleToolProvider = {
   whichCommand: AppleToolAvailabilityChecker;
 };
 
+export const APPLE_PLIST_TIMEOUT_MS = 15_000;
+
 const localAppleToolProvider: AppleToolProvider = {
   runCommand: runCmd,
   simctl: {
@@ -192,6 +194,7 @@ async function readPlistJsonWithCommand(
   try {
     const result = await runCommand('plutil', ['-convert', 'json', '-o', '-', plistPath], {
       allowFailure: true,
+      timeoutMs: APPLE_PLIST_TIMEOUT_MS,
       signal,
     });
     if (result.exitCode !== 0 || !result.stdout.trim()) {

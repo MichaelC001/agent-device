@@ -64,6 +64,7 @@ import { runAdmittedLeaseWork } from './request-lease-work.ts';
 import { assertMacOsAppLeaseProcess } from '../resources/macos-app-lease.ts';
 import {
   getSessionCommandKind,
+  resolveCommandAndroidAvdSelection,
   shouldBlockForInvalidRecording,
   shouldLockSessionExecution,
   shouldValidateSessionSelector,
@@ -137,12 +138,8 @@ async function resolveBoundedClaimDevice(
   env: EnvMap,
   platformServices: DaemonPlatformServices,
 ): Promise<DeviceInfo> {
-  const {
-    resolveBootCommandSelection,
-    resolveCommandDevice,
-    resolvePowerCommandDevice,
-    requireSessionOrExplicitSelector,
-  } = await import('../resources/session-device-resolution.ts');
+  const { resolveBootCommandSelection, resolveCommandDevice, requireSessionOrExplicitSelector } =
+    await import('../resources/session-device-resolution.ts');
   if (req.command !== 'open') {
     const guard = requireSessionOrExplicitSelector(req.command, session, req.flags);
     if (guard && !guard.ok) {
@@ -152,10 +149,15 @@ async function resolveBoundedClaimDevice(
   }
   if (req.command === 'open') return await resolveFreshBoundedOpenDevice(req, env);
   if (req.command === 'install_source' && session) return session.device;
-  const params = { session, flags: req.flags, env, platformServices };
+  const params = {
+    session,
+    flags: req.flags,
+    env,
+    platformServices,
+    androidAvdSelection: resolveCommandAndroidAvdSelection(req.command),
+  };
   if (req.command === 'boot') return (await resolveBootCommandSelection(params)).device;
-  const resolve = req.command === 'shutdown' ? resolvePowerCommandDevice : resolveCommandDevice;
-  return await resolve(params);
+  return await resolveCommandDevice(params);
 }
 
 // Production daemon wiring owns one LeaseRegistry per process; scoping locks by registry keeps

@@ -1,3 +1,4 @@
+import { resolveCommandAndroidAvdSelection } from '../../core/daemon-command-registry.ts';
 import type { DaemonResponse } from '@agent-device/kernel/contracts';
 import type { EnvMap } from '@agent-device/kernel/source-value';
 import type { DaemonPlatformServices } from '../../core/platform-services.ts';
@@ -66,9 +67,9 @@ export async function handleInstallFromSourceDeploymentCommand(params: {
   try {
     resolvedSource = resolveInstallSource(req);
     const retention = resolveRetention(req);
-    const device = await resolveInstallDevice(
+    let device = await resolveInstallDevice(
       session,
-      req.flags,
+      req,
       sessionStore.host.env,
       params.platformServices,
     );
@@ -85,11 +86,10 @@ export async function handleInstallFromSourceDeploymentCommand(params: {
       );
     if (unsupported) return unsupported;
 
-    const runtime = await requireRuntimeBinding(params.bindDevice)(
-      device,
-      readyMaterializeAndDeployAppUse,
-    );
-    await runtime.operations.ensureReady({});
+    const bindDevice = requireRuntimeBinding(params.bindDevice);
+    const readiness = await bindDevice(device, readyMaterializeAndDeployAppUse);
+    device = await readiness.operations.ensureReady({});
+    const runtime = await bindDevice(device, readyMaterializeAndDeployAppUse);
     materialized = await runtime.operations.materializeAppSource({ source: resolvedSource.source });
     retained = await retainIfRequested({
       artifact: materialized,
@@ -141,10 +141,11 @@ export async function handleReleaseMaterializedPathsCommand(params: {
 
 async function resolveInstallDevice(
   session: SessionState | undefined,
-  flags: DaemonRequest['flags'] | undefined,
+  req: DaemonRequest,
   env: EnvMap,
   platformServices: DaemonPlatformServices,
 ): Promise<SessionState['device']> {
+  const flags = req.flags;
   const requestedPlatform = normalizePlatform(flags?.platform);
   if (session && requestedPlatform && !matchesPlatformSelector(session.device, requestedPlatform)) {
     throw new AppError(
@@ -164,7 +165,13 @@ async function resolveInstallDevice(
   if (session) {
     return session.device;
   }
-  return await resolveCommandDevice({ session, flags, env, platformServices });
+  return await resolveCommandDevice({
+    session,
+    flags,
+    env,
+    androidAvdSelection: resolveCommandAndroidAvdSelection(req.command),
+    platformServices,
+  });
 }
 
 function normalizePlatform(
