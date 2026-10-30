@@ -259,6 +259,8 @@ export async function retireFailedAndroidSnapshotHelperSession(params: {
   failedAfterMs: number;
   /** Budget of the one-shot capture that answers in place of the failed session. */
   fallbackBudgetMs: number;
+  /** The session had already answered a capture, and this one got no answer before its deadline. */
+  reusedSessionTimedOut: boolean;
   signal?: AbortSignal;
   cause: unknown;
 }): Promise<void> {
@@ -268,6 +270,18 @@ export async function retireFailedAndroidSnapshotHelperSession(params: {
     cause: params.cause,
   });
   if (params.signal?.aborted) return;
+  // A helper that answered and then went silent was frozen while idle (#3929: ColorOS freezes the
+  // idle helper, force-stop kills it cleanly, and every restarted helper is frozen again), so this
+  // build stays one-shot until reset.
+  if (params.reusedSessionTimedOut) {
+    failedSessions().set(params.identity, Number.POSITIVE_INFINITY);
+    emitDiagnostic({
+      level: 'warn',
+      phase: 'android_snapshot_helper_persistent_session_disabled',
+      data: { deviceKey: params.deviceKey, failedAfterMs: params.failedAfterMs },
+    });
+    return;
+  }
   failedSessions().set(
     params.identity,
     Date.now() +

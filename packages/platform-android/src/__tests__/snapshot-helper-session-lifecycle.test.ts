@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, test } from 'vitest';
+import { afterEach, beforeEach, test, vi } from 'vitest';
 import { captureAndroidSnapshotWithHelperSession } from '../snapshot-helper-session.ts';
 import {
   resetAndroidSnapshotHelperSessions,
@@ -11,10 +11,15 @@ import { recoverAndroidSnapshotHelperRetirement } from '../snapshot-helper-retir
 import {
   createSessionProvider,
   FakeAndroidProcess,
+  isAndroidHelperForwardRemoval,
   isAndroidHelperRuntimeForceStop,
   type SessionProviderOptions,
 } from './snapshot-helper-session.fixtures.ts';
 import type { AndroidAdbExecutor, AndroidAdbProvider } from '../adb-executor.ts';
+import path from 'node:path';
+import { promises as fs } from 'node:fs';
+import { mkdtempForTest } from './test-utils/tmp-dir.ts';
+import { withDiagnosticsScope } from '@agent-device/host-kit/diagnostics';
 
 beforeEach(async () => {
   delete process.env.AGENT_DEVICE_ANDROID_SNAPSHOT_HELPER_SESSION;
@@ -22,6 +27,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   delete process.env.AGENT_DEVICE_ANDROID_SNAPSHOT_HELPER_SESSION;
   await resetAndroidSnapshotHelperSessions();
 });
@@ -225,6 +231,119 @@ test('a session whose capture timed out is not restarted by the next command', a
     'the timed-out helper is stopped',
   );
 });
+
+test('a reused session whose capture times out keeps the helper build one-shot until reset', async () => {
+  const spawnArgs: (readonly string[])[] = [];
+  // The helper answers once and then goes silent: the idle freeze of #3929. Force-stop kills the
+  // frozen process cleanly, so the retirement proves release and only the timeout tells.
+  const provider = createSessionProvider({
+    calls: [],
+    spawnArgs,
+    answeredSnapshotsBeforeStall: 1,
+    stalledSnapshots: 1,
+  });
+  const capture = (deviceKey: string) =>
+    captureAndroidSnapshotWithHelperSession({
+      adb: provider.exec,
+      adbProvider: provider,
+      deviceKey,
+      commandTimeoutMs: 400,
+    });
+  const logPath = path.join(
+    await mkdtempForTest('agent-device-android-session-disable-diag-'),
+    'diag.ndjson',
+  );
+
+  await withDiagnosticsScope({ debug: true, logPath }, async () => {
+    assert.equal((await capture('android:coloros-16'))?.metadata.transport, 'persistent-session');
+    assert.equal(await capture('android:coloros-16'), undefined, 'the frozen session falls back');
+    skewClockPastSessionBackoff();
+    assert.equal(
+      await capture('android:coloros-16'),
+      undefined,
+      'the next command answers one-shot after any ordinary backoff has run out',
+    );
+    assert.equal(spawnArgs.length, 1, 'the frozen helper build is not spawned again');
+    const otherDevice = await capture('android:other-device');
+    assert.equal(otherDevice?.metadata.transport, 'persistent-session');
+  });
+
+  const log = await fs.readFile(logPath, 'utf8');
+  assert.match(log, /"phase":"android_snapshot_helper_session_stop"[^\n]*"release":"released"/);
+  assert.match(log, /android_snapshot_helper_persistent_session_disabled/);
+
+  await resetAndroidSnapshotHelperSessions();
+  const fresh = await capture('android:coloros-16');
+  assert.equal(spawnArgs.length, 3, 'reset allows a fresh persistent attempt');
+  assert.equal(fresh?.metadata.transport, 'persistent-session');
+});
+
+test('a first capture that times out on a fresh session only earns the ordinary backoff', async () => {
+  const spawnArgs: (readonly string[])[] = [];
+  const provider = createSessionProvider({ calls: [], spawnArgs, stalledSnapshots: 1 });
+  const capture = () =>
+    captureAndroidSnapshotWithHelperSession({
+      adb: provider.exec,
+      adbProvider: provider,
+      deviceKey: 'android:emulator-5554',
+      commandTimeoutMs: 400,
+    });
+  const logPath = path.join(
+    await mkdtempForTest('agent-device-android-session-first-timeout-diag-'),
+    'diag.ndjson',
+  );
+
+  await withDiagnosticsScope({ debug: true, logPath }, async () => {
+    assert.equal(await capture(), undefined);
+    skewClockPastSessionBackoff();
+    assert.equal((await capture())?.metadata.transport, 'persistent-session');
+  });
+
+  assert.equal(spawnArgs.length, 2, 'the backoff ran out and a new helper was started');
+  const log = await fs.readFile(logPath, 'utf8');
+  assert.doesNotMatch(log, /android_snapshot_helper_persistent_session_disabled/);
+});
+
+test('a retirement whose forward removal stalls still falls back to one-shot', async () => {
+  const calls: (readonly string[])[] = [];
+  const spawnArgs: (readonly string[])[] = [];
+  const cleanupAborts: (readonly string[])[] = [];
+  // The forward removal hangs until the retirement budget aborts it.
+  const provider = createSessionProvider({
+    calls,
+    spawnArgs,
+    cleanupAborts,
+    stalledSnapshots: 1,
+    stalledForwardRemovals: 1,
+  });
+  const logPath = path.join(
+    await mkdtempForTest('agent-device-android-session-cleanup-timeout-diag-'),
+    'diag.ndjson',
+  );
+
+  await withDiagnosticsScope({ debug: true, logPath }, async () => {
+    assert.equal(
+      await captureAndroidSnapshotWithHelperSession({
+        adb: provider.exec,
+        adbProvider: provider,
+        deviceKey: 'android:emulator-5554',
+        commandTimeoutMs: 400,
+      }),
+      undefined,
+      'the stalled cleanup still falls back to one-shot',
+    );
+  });
+
+  assert.equal(cleanupAborts.filter(isAndroidHelperForwardRemoval).length, 1);
+  const log = await fs.readFile(logPath, 'utf8');
+  assert.match(log, /"externalCleanupTimedOut":true/);
+});
+
+/** Moves the module clock past the longest backoff a failed capture can earn on its own. */
+function skewClockPastSessionBackoff(): void {
+  const realNow = Date.now.bind(Date);
+  vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 10 * 60_000);
+}
 
 test('starts and reuses a persistent Android snapshot helper session', async () => {
   const calls: (readonly string[])[] = [];
