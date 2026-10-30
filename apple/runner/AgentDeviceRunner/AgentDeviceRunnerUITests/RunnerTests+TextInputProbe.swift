@@ -10,6 +10,7 @@ final class TextInputProbeIssues {
 enum TextInputProbeFailure: String, Error {
   case recordedIssue = "text_input_probe_recorded_issue"
   case exception = "text_input_probe_exception"
+  case emptyTree = "text_input_probe_empty_tree"
 }
 
 enum TextInputProbeOutcome {
@@ -58,22 +59,13 @@ extension RunnerTests {
     y: Double,
     contentTranslation: TextEntryContentTranslation
   ) -> CoordinateTextInputResolution {
-    let probed = containingTextInputProbeIssues(fallback: CoordinateTextInputResolution.unavailable) {
-      shouldStop -> CoordinateTextInputResolution in
-      guard let input = queryTextInputs(
-        app: app, point: CGPoint(x: x, y: y), contentTranslation: contentTranslation, shouldStop: shouldStop
-      ).first else {
-        return .absent
-      }
-      guard let identity = input.identity else {
-        return .unavailable
-      }
+    switch probeTextInputs(app: app, point: CGPoint(x: x, y: y), contentTranslation: contentTranslation) {
+    case .matches(let inputs):
+      guard let input = inputs.first, let identity = input.identity else { return .unavailable }
       return .input(TextInputAtPoint(element: input.element, identity: identity))
-    }
-    switch probed {
-    case .success(let resolution):
-      return resolution
-    case .failure:
+    case .absent:
+      return .absent
+    case .unavailable:
       return .unavailable
     }
   }
@@ -102,11 +94,17 @@ extension RunnerTests {
   }
 
   func probeTextInputs(app: XCUIApplication, point: CGPoint, contentTranslation: TextEntryContentTranslation) -> TextInputProbeOutcome {
-    switch containingTextInputProbeIssues(fallback: [], { shouldStop in
-      queryTextInputs(app: app, point: point, contentTranslation: contentTranslation, shouldStop: shouldStop)
-    }) {
-    case .success(let inputs):
+    switch containingTextInputProbeIssues(fallback: TextInputProbeOutcome.unavailable(.emptyTree), { shouldStop in
+      var treeReadable = app.descendants(matching: .any).firstMatch.exists
+#if AGENT_DEVICE_RUNNER_UNIT_TESTS
+      if textInputProbeBlindForTesting { treeReadable = false }
+#endif
+      guard treeReadable else { return .unavailable(.emptyTree) }
+      let inputs = queryTextInputs(app: app, point: point, contentTranslation: contentTranslation, shouldStop: shouldStop)
       return inputs.isEmpty ? .absent : .matches(inputs)
+    }) {
+    case .success(let outcome):
+      return outcome
     case .failure(let failure):
       return .unavailable(failure)
     }
@@ -189,8 +187,6 @@ extension RunnerTests {
         record(issue)
       }
 #endif
-      // One snapshot per candidate answers enablement, frame, and the ordering below. A candidate that
-      // cannot be snapshotted is read live, so its failure still reaches the caller's issue handling.
       for element in candidates {
         if shouldStop() { break }
         guard let candidate = ResolvedTextEntryInput(readingListed: element, contentTranslation: contentTranslation) else { continue }

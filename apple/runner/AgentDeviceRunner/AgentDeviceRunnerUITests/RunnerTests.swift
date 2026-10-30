@@ -173,6 +173,9 @@ final class RunnerTests: XCTestCase {
   // like a field failure. Production builds compile none of this.
   var textInputProbeIssueForTesting: XCTIssue?
 
+  /// Simulates an app tree read that returns no descendants without an issue or exception.
+  var textInputProbeBlindForTesting = false
+
   static let injectedTapFailureFlagPathForTesting =
     "/tmp/agent-device-inject-tap-recorded-failure-for-testing"
 

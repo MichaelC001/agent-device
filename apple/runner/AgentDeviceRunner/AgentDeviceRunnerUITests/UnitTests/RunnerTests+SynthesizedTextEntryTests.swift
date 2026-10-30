@@ -441,5 +441,45 @@ extension RunnerTests {
     XCTAssertEqual(response.error?.code, "TEXT_INPUT_PROBE_UNAVAILABLE")
     XCTAssertEqual(String(describing: textField.value ?? ""), "")
   }
+
+  /// A blind app tree cannot establish that the point has no input (#1721).
+  @MainActor
+  func testSynthesizedReplacementRefusesABlindEnumerationAsUnreadableNotEmpty() throws {
+    let textField = try focusSynthesizedReplacementField()
+    defer {
+      textInputProbeBlindForTesting = false
+      tearDownSynthesizedReplacementField()
+    }
+    textInputProbeBlindForTesting = true
+
+    let frame = textField.frame
+    guard case .unavailable(.emptyTree) = probeTextInputs(app: app, point: CGPoint(x: frame.midX, y: frame.midY), contentTranslation: .none) else {
+      return XCTFail("A blind tree must be unavailable to every probe caller")
+    }
+
+    let response = try replaceSynthesizedFieldText(textField, text: "fresh", commandId: "fill-blind-lookup")
+
+    XCTAssertFalse(response.ok)
+    XCTAssertEqual(response.error?.code, "TEXT_INPUT_PROBE_UNAVAILABLE")
+    XCTAssertEqual(String(describing: textField.value ?? ""), "")
+  }
+
+  @MainActor
+  func testSynthesizedReplacementOnScreenWithoutInputsReportsAbsent() throws {
+    app.launchArguments = []
+    app.launch()
+    defer { tearDownSynthesizedReplacementField() }
+    let label = app.staticTexts["Agent Device Runner"]
+    XCTAssertTrue(label.waitForFixtureExistence(timeout: appExistenceTimeout))
+    XCTAssertEqual(app.textFields.count + app.secureTextFields.count + app.searchFields.count + app.textViews.count, 0)
+    mainOwned.app = app
+    mainOwned.bundleId = "com.callstack.agentdevice.runner"
+    mainOwned.processIdentifier = try XCTUnwrap(Self.processIdentifier(of: app))
+    penalizeSnapshotXCTestChannel(bundleId: nil, reason: "test")
+
+    let response = try replaceSynthesizedFieldText(label, text: "fresh", commandId: "fill-no-inputs")
+    XCTAssertFalse(response.ok)
+    XCTAssertEqual(response.error?.code, "NO_TEXT_INPUT_AT_POINT")
+  }
 #endif
 }
